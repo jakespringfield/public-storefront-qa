@@ -10,7 +10,7 @@ Springfield Systems offers a **$250 USD managed pilot** for one buyer-authorized
 
 The free core requires the caller to design the configuration, run and schedule it, retain local history, verify manifests, and interpret exceptions. The managed service adds written scope design and approval, scheduled captures at the agreed timestamps, retained and versioned runs, manifest verification, bounded exception interpretation, the month-end ledger, and the included correction.
 
-The service never signs in, submits forms, enters carts or checkout, accesses analytics or customer data, changes a site, performs security testing, or claims legal compliance or conversion accuracy. Scope review is non-binding and starts no work or payment: [request a public pilot scope review](https://github.com/jakespringfield/public-storefront-qa/issues/new?template=pilot-scope-review.yml).
+The service never signs in, submits forms, enters carts or checkout, accesses analytics or customer data, changes a site, performs security testing, or claims legal compliance or conversion accuracy. Scope review is non-binding and starts no work or payment: [request a public pilot scope review](https://github.com/jakespringfield/public-storefront-qa/issues/new?template=pilot-scope-review.yml). GitHub sign-in is required to submit, and the resulting issue is public.
 
 Jake Springfield is a public-facing business alias for Springfield Systems, which is not represented as incorporated. OpenAI Codex materially assisted implementation, testing, and documentation. No separate personal human review is promised. The project and service are independent of OpenAI and every storefront evaluated.
 
