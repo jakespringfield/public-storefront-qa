@@ -735,8 +735,11 @@ def decode_html(body: bytes, content_type: str) -> str:
 
 
 def _snapshot(page: PageResult) -> HTMLSnapshot:
+    decoded = decode_html(page.body, page.headers.get("content-type", ""))
+    if "<![" in decoded:
+        raise ValueError("marked HTML sections are unsupported")
     parser = HTMLSnapshot(page.final_url or page.requested_url)
-    parser.feed(decode_html(page.body, page.headers.get("content-type", "")))
+    parser.feed(decoded)
     parser.close()
     return parser
 

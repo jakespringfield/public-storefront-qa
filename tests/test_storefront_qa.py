@@ -405,6 +405,20 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(rows[0].status, "UNAVAILABLE")
         self.assertEqual(rows[0].observed, "unavailable")
 
+    def test_marked_html_sections_are_deterministically_unavailable(self):
+        cfg = valid_config()
+        cfg["checks"] = [cfg["checks"][1]]
+        clean = qa.validate_config(cfg, resolver=lambda _host: ["93.184.216.34"])
+        page = qa.PageResult(
+            "https://example.com/", "https://example.com/", 200,
+            {"content-type": "text/html"},
+            b"<html><head><title>Springfield Systems</title></head><body><![CDATA[x]]></body></html>",
+            None,
+        )
+        rows = qa.evaluate(clean, {"home": page}, "2026-08-14T12:00:00Z")
+        self.assertEqual(rows[0].status, "UNAVAILABLE")
+        self.assertEqual(rows[0].observed, "unavailable")
+
     def test_status_observation_does_not_depend_on_html_parsing(self):
         cfg = valid_config()
         cfg["checks"] = [cfg["checks"][0]]
