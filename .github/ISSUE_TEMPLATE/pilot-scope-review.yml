@@ -1,8 +1,6 @@
 name: Public storefront QA pilot scope review
 description: Request a non-binding public scope review for the $250 managed pilot.
 title: "Pilot scope review: "
-labels:
-  - scope-review
 body:
   - type: markdown
     attributes:
@@ -62,4 +60,3 @@ body:
           required: true
         - label: I understand that this public issue is a non-binding scope review and no work starts until written scope and payment terms are accepted separately.
           required: true
-
