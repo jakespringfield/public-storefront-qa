@@ -10,6 +10,8 @@ Springfield Systems offers a **$250 USD managed pilot** for one buyer-authorized
 
 See the [managed pilot page](https://springfield-systems.jakespringfield1.workers.dev/public-storefront-qa) for the buyer-facing scope, deliverables, operating boundaries, and public intake path.
 
+See [SAMPLE_OUTPUT.md](SAMPLE_OUTPUT.md) for a compact, integrity-linked preview. It is explicitly labeled as an immediate mechanics proof, not 72-hour change evidence.
+
 The free core requires the caller to design the configuration, run and schedule it, retain local history, verify manifests, and interpret exceptions. The managed service adds written scope design and approval, scheduled captures at the agreed timestamps, retained and versioned runs, manifest verification, bounded exception interpretation, the month-end ledger, and the included correction.
 
 The service never signs in, submits forms, enters carts or checkout, accesses analytics or customer data, changes a site, performs security testing, or claims legal compliance or conversion accuracy. Scope review is non-binding and starts no work or payment: [request a public pilot scope review](https://github.com/jakespringfield/public-storefront-qa/issues/new?template=pilot-scope-review.yml). GitHub sign-in is required to submit, and the resulting issue is public.
