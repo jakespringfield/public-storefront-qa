@@ -470,7 +470,144 @@ def _open_pinned(url: str, domain: str, addresses: tuple[str, ...], deadline: fl
             if connection is not None:
                 connection.close()
             raise
-     …1729 tokens truncated…tack) - 1, -1, -1):
+        except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
+            last_error = exc
+            if connection is not None:
+                connection.close()
+    raise TransientFetchError("connection to the validated public destination failed") from last_error
+
+
+def _fetch_chain_once(safe_url: str, domain: str, addresses: tuple[str, ...], deadline: float, max_bytes: int) -> PageResult:
+    current = safe_url
+    for redirect_count in range(MAX_REDIRECTS + 1):
+        connection, response = _open_pinned(current, domain, addresses, deadline)
+        try:
+            headers = _headers_dict(response.getheaders())
+            status = int(response.status)
+            if status in TRANSIENT_STATUSES:
+                raise TransientFetchError(f"transient HTTP status {status}")
+            if 300 <= status <= 399 and "location" in headers:
+                if redirect_count >= MAX_REDIRECTS:
+                    raise FetchError("redirect limit exceeded")
+                try:
+                    candidate = urljoin(current, headers["location"])
+                except ValueError as exc:
+                    raise FetchError("redirect target was malformed") from exc
+                try:
+                    current = validate_public_url(candidate, domain, check_dns=False)
+                except ConfigError as exc:
+                    raise FetchError(f"unsafe redirect blocked: {exc}") from exc
+                continue
+            content_length = headers.get("content-length")
+            if content_length:
+                try:
+                    declared = int(content_length)
+                except ValueError as exc:
+                    raise FetchError("response Content-Length was invalid") from exc
+                if declared < 0 or declared > max_bytes:
+                    raise FetchError(f"response Content-Length exceeded maximum of {max_bytes} bytes")
+            mime, _charset = parse_content_type(headers.get("content-type", ""))
+            if mime not in {"text/html", "application/xhtml+xml"}:
+                raise FetchError(f"response was not HTML (parsed MIME: {mime or 'missing'})")
+            try:
+                body = read_bounded(response, max_bytes, deadline=deadline, connection=connection)
+            except (socket.timeout, TimeoutError) as exc:
+                raise TransientFetchError("end-to-end deadline expired while reading response body") from exc
+            return PageResult(safe_url, current, status, headers, body, None)
+        finally:
+            connection.close()
+    raise FetchError("redirect limit exceeded")
+
+
+def fetch_page(url: str, domain: str, timeout: float, max_bytes: int, resolver: Callable[[str], list[str]] = resolve_addresses) -> PageResult:
+    deadline = time.monotonic() + timeout
+    try:
+        safe_url = validate_public_url(url, domain, check_dns=False)
+    except ConfigError as exc:
+        return PageResult("[rejected-url]", None, None, {}, b"", str(exc))
+    try:
+        addresses = _resolve_with_deadline(domain, resolver, deadline)
+        last_error: BaseException | None = None
+        for _attempt in range(MAX_GET_ATTEMPTS):
+            try:
+                return _fetch_chain_once(safe_url, domain, addresses, deadline, max_bytes)
+            except TransientFetchError as exc:
+                last_error = exc
+                _remaining(deadline)
+        raise TransientFetchError("GET failed after bounded retry") from last_error
+    except (ConfigError, FetchError, OSError) as exc:
+        reason = str(exc).replace("\r", " ").replace("\n", " ")[:500]
+        return PageResult(safe_url, None, None, {}, b"", reason)
+
+
+def _safe_reference(base_url: str, value: str) -> str | None:
+    try:
+        joined = urljoin(base_url, value)
+        parts = urlsplit(joined)
+        _ = parts.port
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            return None
+        return normalize_url(joined)
+    except (ConfigError, TypeError, ValueError):
+        return None
+
+
+class HTMLSnapshot(HTMLParser):
+    def __init__(self, base_url: str):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.title_parts: list[str] = []
+        self._title_depth = 0
+        self._stack: list[tuple[str, bool]] = []
+        self.text_parts: list[str] = []
+        self.canonical: str | None = None
+        self.robots_values: list[str] = []
+        self.structured_data_present = False
+        self.elements: list[tuple[str, dict[str, str]]] = []
+        self.references: set[str] = set()
+
+    def _parent_suppressed(self) -> bool:
+        return self._stack[-1][1] if self._stack else False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        attr_map = {key.lower(): (value or "") for key, value in attrs}
+        self.elements.append((tag, attr_map))
+        if tag == "title":
+            self._title_depth += 1
+        style = re.sub(r"\s+", "", attr_map.get("style", "").lower())
+        suppressed = bool(
+            self._parent_suppressed() or tag in {"head", "script", "style", "noscript", "template"}
+            or "hidden" in attr_map or attr_map.get("aria-hidden", "").lower() == "true"
+            or "display:none" in style or "visibility:hidden" in style
+        )
+        if tag not in VOID_TAGS:
+            self._stack.append((tag, suppressed))
+        if tag == "link" and "canonical" in attr_map.get("rel", "").lower().split() and self.canonical is None:
+            href = attr_map.get("href")
+            if href:
+                self.canonical = _safe_reference(self.base_url, href) or "malformed"
+        if tag == "meta" and attr_map.get("name", "").lower() == "robots":
+            self.robots_values.append(attr_map.get("content", "").lower())
+        if tag == "script" and attr_map.get("type", "").split(";", 1)[0].strip().lower() == "application/ld+json":
+            self.structured_data_present = True
+        for name in ("href", "src"):
+            value = attr_map.get(name)
+            if value:
+                reference = _safe_reference(self.base_url, value)
+                if reference:
+                    self.references.add(reference)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() not in VOID_TAGS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "title" and self._title_depth:
+            self._title_depth -= 1
+        for index in range(len(self._stack) - 1, -1, -1):
             if self._stack[index][0] == tag:
                 del self._stack[index:]
                 break
