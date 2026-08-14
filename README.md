@@ -6,9 +6,9 @@ The free core is complete and usable on its own. It contains no AI runtime, tele
 
 ## Managed pilot
 
-Springfield Systems offers a **$250 USD managed pilot** for one buyer-authorized public domain: up to six public URLs and 20 frozen checks, a baseline, one rerun of the same frozen scope after at least 72 real hours, source-linked CSV and Markdown evidence, and one consolidated factual correction. An optional **$150 USD per-domain monthly continuation** adds four weekly reruns of the same frozen scope and one change-only month-end ledger.
+Springfield Systems offers a **$250 USD managed pilot** for one buyer-authorized public domain: up to six public URLs and 20 frozen checks, a baseline, one rerun of the same frozen scope after at least 72 real hours, source-linked CSV and Markdown evidence, and one consolidated factual correction. An optional **$150 USD per-domain monthly continuation** adds four weekly reruns of the same frozen scope and one change-only month-end ledger. It is month-to-month, with no automatic renewal or scope expansion.
 
-The free core requires the caller to design the configuration, run and schedule it, retain local history, verify manifests, and interpret exceptions. The managed service adds written scope design and approval, real-time scheduling, retained and versioned runs, manifest verification, bounded exception interpretation, the month-end ledger, and the included correction.
+The free core requires the caller to design the configuration, run and schedule it, retain local history, verify manifests, and interpret exceptions. The managed service adds written scope design and approval, scheduled captures at the agreed timestamps, retained and versioned runs, manifest verification, bounded exception interpretation, the month-end ledger, and the included correction.
 
 The service never signs in, submits forms, enters carts or checkout, accesses analytics or customer data, changes a site, performs security testing, or claims legal compliance or conversion accuracy. Scope review is non-binding and starts no work or payment: [request a public pilot scope review](https://github.com/jakespringfield/public-storefront-qa/issues/new?template=pilot-scope-review.yml).
 
