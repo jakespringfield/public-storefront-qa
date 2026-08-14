@@ -5,62 +5,61 @@
   "scheduled_evidence_minimum_hours": 72,
   "urls": [
     {
-      "id": "home",
-      "url": "https://springfield-systems.jakespringfield1.workers.dev/"
+      "id": "storefront",
+      "url": "https://springfield-systems.jakespringfield1.workers.dev/public-storefront-qa"
     }
   ],
   "checks": [
     {
-      "id": "home-status",
-      "url": "home",
+      "id": "storefront-status",
+      "url": "storefront",
       "type": "status",
       "expected": 200
     },
     {
-      "id": "home-title",
-      "url": "home",
+      "id": "storefront-title",
+      "url": "storefront",
       "type": "title",
-      "expected": "Springfield Systems | Public Bug Decision Brief"
+      "expected": "Public Storefront QA Managed Pilot | Springfield Systems"
     },
     {
-      "id": "home-canonical",
-      "url": "home",
+      "id": "storefront-canonical",
+      "url": "storefront",
       "type": "canonical",
-      "expected": "absent"
+      "expected": "https://springfield-systems.jakespringfield1.workers.dev/public-storefront-qa"
     },
     {
-      "id": "home-indexability",
-      "url": "home",
+      "id": "storefront-indexability",
+      "url": "storefront",
       "type": "robots-indexability",
       "expected": "indexable"
     },
     {
-      "id": "home-structured-data",
-      "url": "home",
+      "id": "storefront-structured-data",
+      "url": "storefront",
       "type": "structured-data-presence",
-      "expected": "absent"
+      "expected": "present"
     },
     {
-      "id": "home-primary-copy",
-      "url": "home",
+      "id": "storefront-primary-copy",
+      "url": "storefront",
       "type": "text",
-      "value": "Stop debating the bug. Choose the next move.",
+      "value": "Request the $250 pilot scope review",
       "expected": "present"
     },
     {
-      "id": "home-main-selector",
-      "url": "home",
+      "id": "storefront-main-selector",
+      "url": "storefront",
       "type": "selector",
-      "value": "main#main",
+      "value": "main#storefront-main",
       "expected": "present"
     },
     {
-      "id": "home-css-reference",
-      "url": "home",
+      "id": "storefront-home-reference",
+      "url": "storefront",
       "type": "asset-reference",
-      "value": "https://springfield-systems.jakespringfield1.workers.dev/_next/static/css/index.463PWTUQ.css",
+      "value": "https://springfield-systems.jakespringfield1.workers.dev/",
       "expected": "present"
     }
   ]
 }
-
