@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only, deterministic checks for a bounded set of public HTML pages."""
+"""Read-only, bounded checks for a configured set of public HTML pages."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import hashlib
 import html
 import http.client
 import ipaddress
+import io
 import json
 import os
 import queue
@@ -35,6 +36,8 @@ MAX_TIMEOUT_SECONDS = 20
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_REDIRECTS = 5
 MAX_GET_ATTEMPTS = 2
+TOOL_VERSION = "1.0.0"
+USER_AGENT = f"Springfield-Public-Storefront-QA/{TOOL_VERSION} (+read-only; public GET)"
 BASELINE_SCHEMA = "public-storefront-qa/baseline-v1"
 RUN_SCHEMA = "public-storefront-qa/run-v1"
 MANIFEST_SCHEMA = "public-storefront-qa/commit-v1"
@@ -89,6 +92,12 @@ class CheckResult(NamedTuple):
     observed: str
     status: str
     evidence: str
+
+
+class LoadedBaseline(NamedTuple):
+    observations: dict[tuple[str, str], str]
+    csv_sha256: str
+    captured_at: str
 
 
 def utc_timestamp() -> str:
@@ -448,7 +457,7 @@ def _open_pinned(url: str, domain: str, addresses: tuple[str, ...], deadline: fl
             _call_with_deadline(
                 lambda: connection.request("GET", parts.path or "/", headers={
                     "Accept": "text/html,application/xhtml+xml;q=0.9",
-                    "User-Agent": "Springfield-Public-Storefront-QA/0.2 (+read-only; public GET)",
+                    "User-Agent": USER_AGENT,
                     "Connection": "close",
                 }),
                 deadline,
@@ -461,144 +470,7 @@ def _open_pinned(url: str, domain: str, addresses: tuple[str, ...], deadline: fl
             if connection is not None:
                 connection.close()
             raise
-        except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
-            last_error = exc
-            if connection is not None:
-                connection.close()
-    raise TransientFetchError("connection to the validated public destination failed") from last_error
-
-
-def _fetch_chain_once(safe_url: str, domain: str, addresses: tuple[str, ...], deadline: float, max_bytes: int) -> PageResult:
-    current = safe_url
-    for redirect_count in range(MAX_REDIRECTS + 1):
-        connection, response = _open_pinned(current, domain, addresses, deadline)
-        try:
-            headers = _headers_dict(response.getheaders())
-            status = int(response.status)
-            if status in TRANSIENT_STATUSES:
-                raise TransientFetchError(f"transient HTTP status {status}")
-            if 300 <= status <= 399 and "location" in headers:
-                if redirect_count >= MAX_REDIRECTS:
-                    raise FetchError("redirect limit exceeded")
-                try:
-                    candidate = urljoin(current, headers["location"])
-                except ValueError as exc:
-                    raise FetchError("redirect target was malformed") from exc
-                try:
-                    current = validate_public_url(candidate, domain, check_dns=False)
-                except ConfigError as exc:
-                    raise FetchError(f"unsafe redirect blocked: {exc}") from exc
-                continue
-            content_length = headers.get("content-length")
-            if content_length:
-                try:
-                    declared = int(content_length)
-                except ValueError as exc:
-                    raise FetchError("response Content-Length was invalid") from exc
-                if declared < 0 or declared > max_bytes:
-                    raise FetchError(f"response Content-Length exceeded maximum of {max_bytes} bytes")
-            mime, _charset = parse_content_type(headers.get("content-type", ""))
-            if mime not in {"text/html", "application/xhtml+xml"}:
-                raise FetchError(f"response was not HTML (parsed MIME: {mime or 'missing'})")
-            try:
-                body = read_bounded(response, max_bytes, deadline=deadline, connection=connection)
-            except (socket.timeout, TimeoutError) as exc:
-                raise TransientFetchError("end-to-end deadline expired while reading response body") from exc
-            return PageResult(safe_url, current, status, headers, body, None)
-        finally:
-            connection.close()
-    raise FetchError("redirect limit exceeded")
-
-
-def fetch_page(url: str, domain: str, timeout: float, max_bytes: int, resolver: Callable[[str], list[str]] = resolve_addresses) -> PageResult:
-    deadline = time.monotonic() + timeout
-    try:
-        safe_url = validate_public_url(url, domain, check_dns=False)
-    except ConfigError as exc:
-        return PageResult("[rejected-url]", None, None, {}, b"", str(exc))
-    try:
-        addresses = _resolve_with_deadline(domain, resolver, deadline)
-        last_error: BaseException | None = None
-        for _attempt in range(MAX_GET_ATTEMPTS):
-            try:
-                return _fetch_chain_once(safe_url, domain, addresses, deadline, max_bytes)
-            except TransientFetchError as exc:
-                last_error = exc
-                _remaining(deadline)
-        raise TransientFetchError("GET failed after bounded retry") from last_error
-    except (ConfigError, FetchError, OSError) as exc:
-        reason = str(exc).replace("\r", " ").replace("\n", " ")[:500]
-        return PageResult(safe_url, None, None, {}, b"", reason)
-
-
-def _safe_reference(base_url: str, value: str) -> str | None:
-    try:
-        joined = urljoin(base_url, value)
-        parts = urlsplit(joined)
-        _ = parts.port
-        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
-            return None
-        return normalize_url(joined)
-    except (ConfigError, TypeError, ValueError):
-        return None
-
-
-class HTMLSnapshot(HTMLParser):
-    def __init__(self, base_url: str):
-        super().__init__(convert_charrefs=True)
-        self.base_url = base_url
-        self.title_parts: list[str] = []
-        self._title_depth = 0
-        self._stack: list[tuple[str, bool]] = []
-        self.text_parts: list[str] = []
-        self.canonical: str | None = None
-        self.robots_values: list[str] = []
-        self.structured_data_present = False
-        self.elements: list[tuple[str, dict[str, str]]] = []
-        self.references: set[str] = set()
-
-    def _parent_suppressed(self) -> bool:
-        return self._stack[-1][1] if self._stack else False
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag = tag.lower()
-        attr_map = {key.lower(): (value or "") for key, value in attrs}
-        self.elements.append((tag, attr_map))
-        if tag == "title":
-            self._title_depth += 1
-        style = re.sub(r"\s+", "", attr_map.get("style", "").lower())
-        suppressed = bool(
-            self._parent_suppressed() or tag in {"head", "script", "style", "noscript", "template"}
-            or "hidden" in attr_map or attr_map.get("aria-hidden", "").lower() == "true"
-            or "display:none" in style or "visibility:hidden" in style
-        )
-        if tag not in VOID_TAGS:
-            self._stack.append((tag, suppressed))
-        if tag == "link" and "canonical" in attr_map.get("rel", "").lower().split() and self.canonical is None:
-            href = attr_map.get("href")
-            if href:
-                self.canonical = _safe_reference(self.base_url, href) or "malformed"
-        if tag == "meta" and attr_map.get("name", "").lower() == "robots":
-            self.robots_values.append(attr_map.get("content", "").lower())
-        if tag == "script" and attr_map.get("type", "").split(";", 1)[0].strip().lower() == "application/ld+json":
-            self.structured_data_present = True
-        for name in ("href", "src"):
-            value = attr_map.get(name)
-            if value:
-                reference = _safe_reference(self.base_url, value)
-                if reference:
-                    self.references.add(reference)
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.handle_starttag(tag, attrs)
-        if tag.lower() not in VOID_TAGS:
-            self.handle_endtag(tag)
-
-    def handle_endtag(self, tag: str) -> None:
-        tag = tag.lower()
-        if tag == "title" and self._title_depth:
-            self._title_depth -= 1
-        for index in range(len(self._stack) - 1, -1, -1):
+     …1729 tokens truncated…tack) - 1, -1, -1):
             if self._stack[index][0] == tag:
                 del self._stack[index:]
                 break
@@ -725,6 +597,17 @@ def read_csv_records(path: Path) -> list[dict[str, str]]:
         return [{key: restore_csv_cell(value) for key, value in row.items()} for row in reader]
 
 
+def _read_csv_records_bytes(payload: bytes) -> list[dict[str, str]]:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError("baseline CSV is not valid UTF-8") from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if reader.fieldnames != CSV_FIELDS:
+        raise ConfigError("baseline CSV schema does not exactly match the required fields")
+    return [{key: restore_csv_cell(value) for key, value in row.items()} for row in reader]
+
+
 def markdown_cell(value: object) -> str:
     text = str(value).replace("\r\n", "\n").replace("\r", "\n")
     escaped = html.escape(text, quote=True).replace("\\", "\\\\").replace("|", "\\|")
@@ -785,13 +668,21 @@ def _baseline_metadata(csv_path: Path, rows: list[CheckResult], config: dict, ti
     baseline_time = validate_timestamp(timestamp)
     earliest = baseline_time + timedelta(hours=config["scheduled_evidence_minimum_hours"])
     return {
-        "schema": BASELINE_SCHEMA, "mode": "baseline", "config_digest": config_digest(config),
+        "schema": BASELINE_SCHEMA, "mode": "baseline", "tool_version": TOOL_VERSION,
+        "config_digest": config_digest(config),
         "csv_sha256": _sha256_file(csv_path), "fields": CSV_FIELDS, "row_count": len(rows),
         "captured_at": timestamp, "earliest_scheduled_evidence_at": earliest.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
 
-def write_run_artifacts(out: Path, mode: str, rows: list[CheckResult], config: dict, timestamp: str) -> dict:
+def write_run_artifacts(
+    out: Path,
+    mode: str,
+    rows: list[CheckResult],
+    config: dict,
+    timestamp: str,
+    baseline_provenance: LoadedBaseline | None = None,
+) -> dict:
     if mode not in {"baseline", "rerun", "scheduled-rerun"}:
         raise ConfigError("unsupported run mode")
     validate_timestamp(timestamp)
@@ -806,16 +697,21 @@ def write_run_artifacts(out: Path, mode: str, rows: list[CheckResult], config: d
         if mode == "baseline":
             metadata = _baseline_metadata(csv_stage, rows, config, timestamp)
         else:
+            if baseline_provenance is None:
+                raise ConfigError("rerun baseline provenance is required")
             metadata = {
-                "schema": RUN_SCHEMA, "mode": mode,
+                "schema": RUN_SCHEMA, "mode": mode, "tool_version": TOOL_VERSION,
                 "evidence_class": "scheduled-change-evidence" if mode == "scheduled-rerun" else "immediate-mechanics-proof",
                 "qualifies_as_scheduled_evidence": mode == "scheduled-rerun",
                 "config_digest": config_digest(config), "csv_sha256": _sha256_file(csv_stage),
                 "fields": CSV_FIELDS, "row_count": len(rows), "captured_at": timestamp,
+                "baseline_csv_sha256": baseline_provenance.csv_sha256,
+                "baseline_captured_at": baseline_provenance.captured_at,
             }
         _write_json(meta_stage, metadata)
         manifest = {
-            "schema": MANIFEST_SCHEMA, "mode": mode, "committed_at": utc_timestamp(),
+            "schema": MANIFEST_SCHEMA, "mode": mode, "tool_version": TOOL_VERSION,
+            "committed_at": utc_timestamp(),
             "files": {csv_name: _sha256_file(csv_stage), "exceptions.md": _sha256_file(md_stage), meta_name: _sha256_file(meta_stage)},
         }
         _write_json(stage / "output-manifest.json", manifest)
@@ -845,13 +741,14 @@ def write_run_artifacts(out: Path, mode: str, rows: list[CheckResult], config: d
         shutil.rmtree(stage, ignore_errors=True)
 
 
-def load_baseline(path: Path, expected_config_digest: str, expected_keys: set[tuple[str, str]] | None = None) -> dict[tuple[str, str], str]:
+def _load_baseline(path: Path, expected_config_digest: str, expected_keys: set[tuple[str, str]] | None = None) -> LoadedBaseline:
     try:
         metadata = json.loads(path.with_name("baseline.meta.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ConfigError("baseline metadata is missing or invalid") from exc
     required = {"schema", "mode", "config_digest", "csv_sha256", "fields", "row_count", "captured_at", "earliest_scheduled_evidence_at"}
-    if set(metadata) != required or metadata.get("schema") != BASELINE_SCHEMA or metadata.get("mode") != "baseline":
+    metadata_fields = set(metadata)
+    if metadata_fields not in (required, required | {"tool_version"}) or metadata.get("schema") != BASELINE_SCHEMA or metadata.get("mode") != "baseline":
         raise ConfigError("baseline metadata schema is invalid")
     if metadata["config_digest"] != expected_config_digest:
         raise ConfigError("baseline config digest does not match the current normalized config")
@@ -859,9 +756,14 @@ def load_baseline(path: Path, expected_config_digest: str, expected_keys: set[tu
         raise ConfigError("baseline metadata fields are invalid")
     validate_timestamp(metadata["captured_at"])
     validate_timestamp(metadata["earliest_scheduled_evidence_at"])
-    if _sha256_file(path) != metadata["csv_sha256"]:
+    try:
+        csv_payload = path.read_bytes()
+    except OSError as exc:
+        raise ConfigError("baseline CSV is missing or unreadable") from exc
+    csv_sha256 = hashlib.sha256(csv_payload).hexdigest()
+    if csv_sha256 != metadata["csv_sha256"]:
         raise ConfigError("baseline CSV digest does not match its metadata")
-    records = read_csv_records(path)
+    records = _read_csv_records_bytes(csv_payload)
     validate_baseline_records(records)
     if metadata["row_count"] != len(records):
         raise ConfigError("baseline row count does not match its metadata")
@@ -870,7 +772,11 @@ def load_baseline(path: Path, expected_config_digest: str, expected_keys: set[tu
     result = {(record["url"], record["check"]): record["observed"] for record in records}
     if expected_keys is not None and set(result) != expected_keys:
         raise ConfigError("baseline rows do not exactly match the configured URL/check set")
-    return result
+    return LoadedBaseline(result, csv_sha256, metadata["captured_at"])
+
+
+def load_baseline(path: Path, expected_config_digest: str, expected_keys: set[tuple[str, str]] | None = None) -> dict[tuple[str, str], str]:
+    return _load_baseline(path, expected_config_digest, expected_keys).observations
 
 
 def enforce_scheduled_evidence_gate(baseline_time: datetime, scheduled_for: datetime, now: datetime, minimum_age_hours: int) -> None:
@@ -918,16 +824,18 @@ def run(args: argparse.Namespace) -> int:
     if mode == "scheduled-rerun":
         _scheduled_preflight(raw, args.baseline, args.scheduled_for)
     config = validate_config(raw)
+    loaded_baseline = None
     baseline = None
     if mode in {"rerun", "scheduled-rerun"}:
-        baseline = load_baseline(args.baseline, config_digest(config), _config_keys(config))
+        loaded_baseline = _load_baseline(args.baseline, config_digest(config), _config_keys(config))
+        baseline = loaded_baseline.observations
     timestamp = utc_timestamp()
     pages = {
         entry["id"]: fetch_page(entry["url"], config["domain"], config["timeout_seconds"], config["max_response_bytes"])
         for entry in config["urls"]
     }
     rows = evaluate(config, pages, timestamp, baseline)
-    metadata = write_run_artifacts(args.out, mode, rows, config, timestamp)
+    metadata = write_run_artifacts(args.out, mode, rows, config, timestamp, loaded_baseline)
     csv_name = "baseline.csv" if mode == "baseline" else "rerun.csv"
     counts = {status: sum(row.status == status for row in rows) for status in ("PASS", "DRIFT", "UNAVAILABLE")}
     print(json.dumps({"output": str(args.out / csv_name), "exceptions": str(args.out / "exceptions.md"), "metadata": metadata, **counts}, sort_keys=True))
