@@ -1,0 +1,65 @@
+name: Public storefront QA pilot scope review
+description: Request a non-binding public scope review for the $250 managed pilot.
+title: "Pilot scope review: "
+labels:
+  - scope-review
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Submit only public, non-security storefront URLs and public expectations. Do not submit credentials, personal or customer data, analytics exports, unpublished code, vulnerability details, or financial information.
+
+        A scope review is non-binding. It creates no order, payment obligation, reservation, or work. The fixed pilot is $250 USD for one buyer-authorized public domain, up to six public URLs and 20 frozen checks, a baseline, one rerun after at least 72 real hours, source-linked CSV and Markdown evidence, and one consolidated factual correction. Optional continuation is $150 USD per domain per month for four weekly reruns of the same frozen scope and one change-only month-end ledger, month-to-month with no automatic renewal or scope expansion.
+  - type: input
+    id: domain
+    attributes:
+      label: Public domain
+      description: One public HTTPS domain that you are authorized to nominate.
+      placeholder: https://store.example.com/
+    validations:
+      required: true
+  - type: textarea
+    id: urls
+    attributes:
+      label: Public URLs
+      description: List one to six public URLs on the same domain. No query strings, fragments, account, cart, checkout, or administration routes.
+      placeholder: |
+        https://store.example.com/
+        https://store.example.com/products/example
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Frozen public checks
+      description: Name up to 20 observable expectations, such as status, title, canonical, indexability, structured-data presence, public text, selector presence, or same-domain asset reference.
+      placeholder: |
+        Homepage status is 200
+        Homepage canonical is https://store.example.com/
+        Product page contains the public text In stock
+    validations:
+      required: true
+  - type: dropdown
+    id: price_fit
+    attributes:
+      label: Price fit
+      description: This is a non-confidential purchase-intent signal, not a payment or order.
+      options:
+        - At $250 USD, request a written pilot scope review
+        - Review the technical fit only, no purchase intent yet
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Public-only boundaries
+      options:
+        - label: I am authorized to nominate this public domain for low-frequency read-only checks.
+          required: true
+        - label: I will not submit credentials, private or personal data, security details, analytics access, forms, cart or checkout actions, or unpublished code.
+          required: true
+        - label: I understand that OpenAI Codex materially assists the tool and managed evidence work, no separate personal human review is promised, and no target code or JavaScript is executed.
+          required: true
+        - label: I understand that this public issue is a non-binding scope review and no work starts until written scope and payment terms are accepted separately.
+          required: true
+
