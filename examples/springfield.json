@@ -1,0 +1,66 @@
+{
+  "domain": "springfield-systems.jakespringfield1.workers.dev",
+  "timeout_seconds": 10,
+  "max_response_bytes": 500000,
+  "scheduled_evidence_minimum_hours": 72,
+  "urls": [
+    {
+      "id": "home",
+      "url": "https://springfield-systems.jakespringfield1.workers.dev/"
+    }
+  ],
+  "checks": [
+    {
+      "id": "home-status",
+      "url": "home",
+      "type": "status",
+      "expected": 200
+    },
+    {
+      "id": "home-title",
+      "url": "home",
+      "type": "title",
+      "expected": "Springfield Systems | Public Bug Decision Brief"
+    },
+    {
+      "id": "home-canonical",
+      "url": "home",
+      "type": "canonical",
+      "expected": "absent"
+    },
+    {
+      "id": "home-indexability",
+      "url": "home",
+      "type": "robots-indexability",
+      "expected": "indexable"
+    },
+    {
+      "id": "home-structured-data",
+      "url": "home",
+      "type": "structured-data-presence",
+      "expected": "absent"
+    },
+    {
+      "id": "home-primary-copy",
+      "url": "home",
+      "type": "text",
+      "value": "Stop debating the bug. Choose the next move.",
+      "expected": "present"
+    },
+    {
+      "id": "home-main-selector",
+      "url": "home",
+      "type": "selector",
+      "value": "main#main",
+      "expected": "present"
+    },
+    {
+      "id": "home-css-reference",
+      "url": "home",
+      "type": "asset-reference",
+      "value": "https://springfield-systems.jakespringfield1.workers.dev/_next/static/css/index.463PWTUQ.css",
+      "expected": "present"
+    }
+  ]
+}
+
