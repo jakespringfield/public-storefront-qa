@@ -2,12 +2,10 @@ import csv
 import hashlib
 import io
 import json
-import sys
 import tempfile
 import time
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -127,62 +125,6 @@ class ConfigSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(qa.ConfigError, "timeout_seconds"):
             qa.validate_config(cfg, resolver=lambda _host: ["93.184.216.34"])
 
-    def test_rejects_config_strings_that_cannot_round_trip_through_artifacts(self):
-        cases = []
-        cfg = valid_config()
-        cfg["checks"][1]["expected"] = "x" * (qa.MAX_CONFIG_VALUE_CHARS + 1)
-        cases.append(cfg)
-        cfg = valid_config()
-        cfg["checks"][5]["value"] = "x" * (qa.MAX_CONFIG_VALUE_CHARS + 1)
-        cases.append(cfg)
-        cfg = valid_config()
-        cfg["urls"][0]["url"] = "https://example.com/" + "x" * qa.MAX_URL_CHARS
-        cases.append(cfg)
-        for cfg in cases:
-            with self.subTest(), self.assertRaisesRegex(qa.ConfigError, "too long"):
-                qa.validate_config(cfg, resolver=lambda _host: ["93.184.216.34"])
-
-    def test_rejects_escaped_lone_surrogate_as_invalid_unicode(self):
-        with self.assertRaisesRegex(qa.ConfigError, "Unicode"):
-            qa._strict_json_object(b'{"value":"\\ud800"}', "config")
-
-    def test_pathological_json_numbers_and_depth_fail_as_config_errors(self):
-        huge_integer = b'{"value":' + (b"9" * 5_000) + b"}"
-        deeply_nested = b'{"value":' + (b"[" * 1_500) + b"0" + (b"]" * 1_500) + b"}"
-        for payload in (huge_integer, deeply_nested):
-            with self.subTest(size=len(payload)), self.assertRaises(qa.ConfigError):
-                qa._strict_json_object(payload, "config")
-
-    def test_unicode_scalar_validation_is_iterative(self):
-        value = "safe"
-        for _ in range(2_000):
-            value = [value]
-        qa._validate_unicode_scalar_strings(value, "config")
-
-    def test_bad_json_value_types_fail_as_config_errors(self):
-        cases = []
-        cfg = valid_config()
-        cfg["checks"][0]["url"] = []
-        cases.append(cfg)
-        cfg = valid_config()
-        cfg["checks"][0]["type"] = []
-        cases.append(cfg)
-        cfg = valid_config()
-        cfg["checks"][4]["expected"] = []
-        cases.append(cfg)
-        for cfg in cases:
-            with self.subTest(), self.assertRaises(qa.ConfigError):
-                qa.validate_config(cfg, check_dns=False)
-
-    def test_missing_cli_arguments_exit_one_not_capture_exception_two(self):
-        for command in ("baseline", "schedule-digest", "month-end-ledger"):
-            stderr = io.StringIO()
-            with self.subTest(command=command), mock.patch.object(
-                sys, "argv", ["storefront_qa.py", command]
-            ), redirect_stderr(stderr):
-                self.assertEqual(qa.main(), 1)
-            self.assertIn("error:", stderr.getvalue())
-
     def test_canonical_may_explicitly_expect_absence(self):
         cfg = valid_config()
         cfg["checks"][2]["expected"] = "absent"
@@ -215,28 +157,6 @@ class FetchSafetyTests(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertEqual(transport.call_count, 2)
 
-    def test_final_transient_html_status_remains_observable_after_retry(self):
-        def response():
-            item = mock.Mock()
-            item.status = 503
-            item.getheaders.return_value = [
-                ("Content-Type", "text/html; charset=utf-8"),
-                ("Content-Length", "20"),
-            ]
-            item.read.side_effect = [b"<html>retry</html>", b""]
-            return item
-
-        connections = [(mock.Mock(), response()), (mock.Mock(), response())]
-        with mock.patch.object(qa, "_open_pinned", side_effect=connections) as transport:
-            result = qa.fetch_page(
-                "https://example.com/", "example.com", 5, 1000,
-                resolver=lambda _host: ["93.184.216.34"],
-            )
-        self.assertIsNone(result.error)
-        self.assertEqual(result.status, 503)
-        self.assertEqual(result.body, b"<html>retry</html>")
-        self.assertEqual(transport.call_count, 2)
-
     def test_https_socket_connects_to_pinned_ip_but_uses_domain_sni(self):
         fake_socket = mock.Mock()
         fake_context = mock.Mock()
@@ -266,34 +186,6 @@ class FetchSafetyTests(unittest.TestCase):
         self.assertEqual(qa.parse_content_type('Text/HTML; charset="utf-8"'), ("text/html", "utf-8"))
         self.assertEqual(qa.parse_content_type("text/htmlish"), ("text/htmlish", None))
         self.assertEqual(qa.parse_content_type(""), (None, None))
-
-    def test_header_selected_codec_failure_falls_back_to_utf8_replacement(self):
-        self.assertEqual(qa.decode_html(b"plain text", "text/html; charset=idna"), "plain text")
-
-    def test_successful_header_codec_decode_cannot_emit_surrogates(self):
-        decoded = qa.decode_html(b"\\ud800", "text/html; charset=unicode_escape")
-        decoded.encode("utf-8")
-        self.assertNotIn("\ud800", decoded)
-
-    def test_unicode_request_path_is_percent_encoded_at_transport_seam(self):
-        connection = mock.Mock()
-        response = mock.Mock()
-        connection.getresponse.return_value = response
-        with mock.patch.object(qa, "PinnedHTTPSConnection", return_value=connection):
-            returned_connection, returned_response = qa._open_pinned(
-                "https://example.com/cafÃ©", "example.com", ("93.184.216.34",),
-                time.monotonic() + 1,
-            )
-        self.assertIs(returned_connection, connection)
-        self.assertIs(returned_response, response)
-        self.assertEqual(connection.request.call_args.args[:2], ("GET", "/caf%C3%A9"))
-
-    def test_private_dns_rebinding_fails_closed(self):
-        with self.assertRaisesRegex(qa.ConfigError, "public IP"):
-            qa.fetch_page(
-                "https://example.com/", "example.com", 5, 1000,
-                resolver=lambda _host: ["10.0.0.8"],
-            )
 
     def test_slow_response_headers_obey_wall_clock_deadline(self):
         class SlowHeaderConnection:
@@ -327,4 +219,222 @@ class FetchSafetyTests(unittest.TestCase):
                 return object()
 
             def close(self):
-                return×^4ÒÚ$z{-®éÜj×6VÆ–æR"“ ¢ç'Vâ†&w2¢Fç2æ76W'Eöæ÷Eö6ÆÆVB‚¢fWF6‚æ76W'Eöæ÷Eö6ÆÆVB‚¢6VÆbæ76W'DfÇ6R†÷WBæW†—7G2‚’ ¢FVbFW7E÷66†VGVÆUö&÷VæE÷&W'Vå÷&V¦V7G5ö÷WGWEö–ç6–FU÷&W6öÇfVEöÖæ–fW7Eö'VæFÆR‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&VÅö'VæFÆRÂ66†VGVÆU÷F‚Â÷'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢Æ–5ö'VæFÆRÒ&ö÷Bò&Æ–2Ö'VæFÆR ¢Æ–5ö'VæFÆRæÖ¶F—"‚¢†Æ–5ö'VæFÆRò&&6VÆ–æRæ77b"’çw&—FUö'—FW2‚‡&VÅö'VæFÆRò&&6VÆ–æRæ77b"’ç&VEö'—FW2‚’¢†Æ–5ö'VæFÆRò&÷WGWBÖÖæ–fW7Bæ§6öâ"’çw&—FU÷FW‡B‚'7–ÖÆ–æ²Æ6V†öÆFW""ÂVæ6öF–æsÒ'WFbÓ‚"¢÷WBÒ&VÅö'VæFÆRò&æW7FVBÖ÷WGWB ¢&w2ÒæÖW76R€¢6öÖÖæCÒ'66†VGVÆVB×&W'Vâ"Â6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æSÖÆ–5ö'VæFÆRò&&6VÆ–æRæ77b"Â66†VGVÆS×66†VGVÆU÷F‚À¢v–æF÷sÒ'vVV²Ó"Â66†VGVÆVEöf÷#ÔæöæRÂ÷WCÖ÷WBÀ¢¢&VÅ÷&W6öÇfRÒF‚ç&W6öÇfP ¢FVbÖæ–fW7E÷7–ÖÆ–æµ÷&W6öÇfR‡F‚Â§&W6öÇfUö&w2Â¢§&W6öÇfUö·v&w2“ ¢–bF‚‡F‚’æ'6öÇWFR‚’ÓÒ†Æ–5ö'VæFÆRò&÷WGWBÖÖæ–fW7Bæ§6öâ"’æ'6öÇWFR‚“ ¢&WGW&â&VÅö'VæFÆRò&÷WGWBÖÖæ–fW7Bæ§6öâ ¢&WGW&â&VÅ÷&W6öÇfR‡F‚Â§&W6öÇfUö&w2Â¢§&W6öÇfUö·v&w2 ¢v—F‚Öö6²çF6‚æö&¦V7B‡Â&FFWF–ÖR"Âw&3ÖFFWF–ÖR’26Æö6²ÂÖö6²çF6‚æö&¦V7B€¢Â%÷&W6öÇfU÷v—F…öFVFÆ–æR ¢’2Fç2ÂÖö6²çF6‚æö&¦V7B‡Â&fWF6…÷vR"’2fWF6ƒ ¢6Æö6²ææ÷rç&WGW&å÷fÇVRÒFFWF–ÖRƒ##bÂrÂ‚Â"Â3ÂG¦–æfó×F–ÖW¦öæRçWF2¢v—F‚Öö6²çF6‚æö&¦V7B…F‚Â'&W6öÇfR"ÂWF÷7V3ÕG'VRÂ6–FUöVffV7CÖÖæ–fW7E÷7–ÖÆ–æµ÷&W6öÇfR“ ¢v—F‚6VÆbæ76W'E&—6W5&VvW‚‡ä6öæf–tW'&÷"Â&Æ–2F†R&6VÆ–æWÇfW&–f–VBÖæ–fW7B"“ ¢ç'Vâ†&w2¢Fç2æ76W'Eöæ÷Eö6ÆÆVB‚¢fWF6‚æ76W'Eöæ÷Eö6ÆÆVB‚¢6VÆbæ76W'DfÇ6R†÷WBæW†—7G2‚’ ¢FVbFW7E÷66†VGVÆUö&÷VæE÷&W'Våöf–Ç5ö&Vf÷&UöFç5÷VçF–Åö—G5÷v–æF÷uö÷Vç2‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â÷'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢&w2ÒæÖW76R€¢6öÖÖæCÒ'66†VGVÆVB×&W'Vâ"À¢6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æSÖ&6VÆ–æUöF—"ò&&6VÆ–æRæ77b"À¢66†VGVÆS×66†VGVÆU÷F‚À¢v–æF÷sÒ'vVV²Ó"À¢66†VGVÆVEöf÷#ÔæöæRÀ¢÷WC×&ö÷Bò'FöòÖV&Ç’"À¢¢v—F‚Öö6²çF6‚æö&¦V7B‡Â&FFWF–ÖR"Âw&3ÖFFWF–ÖR’26Æö6²ÂÖö6²çF6‚æö&¦V7B€¢Â%÷&W6öÇfU÷v—F…öFVFÆ–æR ¢’2Fç2ÂÖö6²çF6‚æö&¦V7B‡Â&fWF6…÷vR"’2fWF6ƒ ¢6Æö6²ææ÷rç&WGW&å÷fÇVRÒFFWF–ÖRƒ##bÂrÂ‚ÂÂS’ÂS’ÂG¦–æfó×F–ÖW¦öæRçWF2¢v—F‚6VÆbæ76W'E&—6W5&VvW‚‡ä6öæf–tW'&÷"Â'v–æF÷r—2æ÷B÷Vâ"“ ¢ç'Vâ†&w2¢Fç2æ76W'Eöæ÷Eö6ÆÆVB‚¢fWF6‚æ76W'Eöæ÷Eö6ÆÆVB‚¢6VÆbæ76W'DfÇ6R†&w2æ÷WBæW†—7G2‚’ ¢FVbFW7E÷66†VGVÆUö&÷VæE÷&W'Vå÷W'6—7G5÷v–æF÷uöÆ–æVvUö–åöög&W6…ö'VæFÆR‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â÷'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢÷WBÒ&ö÷Bò&6GW&VB×vVV² ¢vRÒåvU&W7VÇB€¢&‡GG3¢òöW†×ÆRæ6öÒò"Â&‡GG3¢òöW†×ÆRæ6öÒò"Â#À¢²&6öçFVçB×G—R#¢'FW‡Bö‡FÖÃ²6†'6WC×WFbÓ‚'ÒÂ…DÔÂÂæöæRÀ¢¢&w2ÒæÖW76R€¢6öÖÖæCÒ'66†VGVÆVB×&W'Vâ"À¢6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æSÖ&6VÆ–æUöF—"ò&&6VÆ–æRæ77b"À¢66†VGVÆS×66†VGVÆU÷F‚À¢v–æF÷sÒ'vVV²Ó"À¢66†VGVÆVEöf÷#ÔæöæRÀ¢÷WCÖ÷WBÀ¢¢v—F‚Öö6²çF6‚æö&¦V7B‡Â&FFWF–ÖR"Âw&3ÖFFWF–ÖR’26Æö6²ÂÖö6²çF6‚æö&¦V7B€¢Â%÷&W6öÇfU÷v—F…öFVFÆ–æR"Â&WGW&å÷fÇVSÒ‚#“2ãƒBã#bã3B"Â¢’ÂÖö6²çF6‚æö&¦V7B‡Â&fWF6…÷vR"Â&WGW&å÷fÇVS×vR“ ¢6Æö6²ææ÷rç&WGW&å÷fÇVRÒFFWF–ÖRƒ##bÂrÂ‚Â"Â3ÂG¦–æfó×F–ÖW¦öæRçWF2¢6VÆbæ76W'DWVÂ‡ç'Vâ†&w2’Â¢ÖWFFFÒ§6öâæÆöG2‚†÷WBò'&W'VâæÖWFæ§6öâ"’ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’¢66†VGVÆRÒ§6öâæÆöG2‡66†VGVÆU÷F‚ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’¢6VÆbæ76W'DWVÂ†ÖWFFF²'66†VGVÆU÷6†#Sb%ÒÂåö6æöæ–6Åö§6öå÷6†#Sb‡66†VGVÆR’¢6VÆbæ76W'DWVÂ†ÖWFFF²'v–æF÷uö–B%ÒÂ'vVV²Ó"¢6VÆbæ76W'DWVÂ†ÖWFFF²'66†VGVÆVEöf÷"%ÒÂ###bÓrÓ…C#££¢"¢6VÆbæ76W'DWVÂ†ÖWFFF²&6GW&VEöB%ÒÂ###bÓrÓ…C#£3£¢"¢ÆöFVBÒåöÆöE÷fW&–f–VEö6GW&R†÷WBò&÷WGWBÖÖæ–fW7Bæ§6öâ"Â'66†VGVÆVB×&W'Vâ"¢6VÆbæ76W'DWVÂ†ÆöFVBçv–æF÷uö–BÂ'vVV²Ó" ¢FVbFW7E÷v–æF÷uö6Æ÷6Uö65öV6…öfWF6…öæE÷7F÷5öÆFW%övWG2‡6VÆb“ ¢&rÒfÆ–Eö6öæf–r‚¢&u²'W&Ç2%ÒæVæB‡²&–B#¢&&÷WB"Â'W&Â#¢&‡GG3¢òöW†×ÆRæ6öÒö&÷WB'Ò¢6frÒçfÆ–FFUö6öæf–r‡&rÂ6†V6µöFç3ÔfÇ6R¢6Æ÷6W5öBÒFFWF–ÖRƒ##bÂrÂ‚Â2ÂG¦–æfó×F–ÖW¦öæRçWF2¢6Æö6²Ò—FW"…°¢FFWF–ÖRƒ##bÂrÂ‚Â"ÂS’ÂS’ÂG¦–æfó×F–ÖW¦öæRçWF2’À¢6Æ÷6W5öBÀ¢Ò¢vRÒåvU&W7VÇB€¢&‡GG3¢òöW†×ÆRæ6öÒò"Â&‡GG3¢òöW†×ÆRæ6öÒò"Â#À¢²&6öçFVçB×G—R#¢'FW‡Bö‡FÖÃ²6†'6WC×WFbÓ‚'ÒÂ…DÔÂÂæöæRÀ¢¢v—F‚Öö6²çF6‚æö&¦V7B‡Â&fWF6…÷vR"Â&WGW&å÷fÇVS×vR’2fWF6ƒ ¢v—F‚6VÆbæ76W'E&—6W5&VvW‚‡ä6öæf–tW'&÷"Â'v–æF÷r6Æ÷6VB"“ ¢åö6GW&U÷vW2€¢6frÂ6Æ÷6W5öCÖ6Æ÷6W5öBÂæ÷u÷&÷f–FW#ÖÆÖ&F¢æW‡B†6Æö6²’À¢¢6VÆbæ76W'DWVÂ†fWF6‚æ6ÆÅö6÷VçBÂ¢6VÆbæ76W'DWVÂ†fWF6‚æ6ÆÅö&w2æ&w5³%ÒÂã ¢FVbFW7E÷66†VGVÆUö&÷VæE÷&W'Vå÷&V6÷&G5÷G&ç6–VçEöFç5öf–ÇW&R‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â÷'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢÷WBÒ&ö÷Bò&Fç2×Væf–Æ&ÆR ¢&w2ÒæÖW76R€¢6öÖÖæCÒ'66†VGVÆVB×&W'Vâ"Â6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æSÖ&6VÆ–æUöF—"ò&&6VÆ–æRæ77b"Â66†VGVÆS×66†VGVÆU÷F‚À¢v–æF÷sÒ'vVV²Ó"Â66†VGVÆVEöf÷#ÔæöæRÂ÷WCÖ÷WBÀ¢¢v—F‚Öö6²çF6‚æö&¦V7B‡Â&FFWF–ÖR"Âw&3ÖFFWF–ÖR’26Æö6²ÂÖö6²çF6‚æö&¦V7B€¢Â%÷fÆ–FFUö†÷7EöFG&W76W2 ¢’2VvW%öFç2ÂÖö6²çF6‚æö&¦V7B€¢Â%÷&W6öÇfU÷v—F…öFVFÆ–æR"Â6–FUöVffV7C×åG&ç6–VçDfWF6„W'&÷"‚$Då2&W6öÇWF–öâf–ÆVB"¢“ ¢6Æö6²ææ÷rç&WGW&å÷fÇVRÒFFWF–ÖRƒ##bÂrÂ‚Â"Â3ÂG¦–æfó×F–ÖW¦öæRçWF2¢6VÆbæ76W'DWVÂ‡ç'Vâ†&w2’Â"¢VvW%öFç2æ76W'Eöæ÷Eö6ÆÆVB‚¢&V6÷&G2Òç&VEö77e÷&V6÷&G2†÷WBò'&W'Vâæ77b"¢6VÆbæ76W'DWVÂ‡&V6÷&G5³Õ²'7FGW2%ÒÂ%Täd”Ä$ÄR"¢6VÆbæ76W'D–â‚$Då2&W6öÇWF–öâf–ÆVB"Â&V6÷&G5³Õ²&Wf–FVæ6R%Ò ¢FVbFW7E÷¦W&õ÷G&ç6—F–öåöÆVFvW%ö†5ö†VFW%ööæÇ•ö77eöæE÷&V6—6Uöæõö6†ævUö6÷’‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢÷WBÒ&ö÷Bò&ÆVFvW" ¢ç'Vâ„æÖW76R€¢6öÖÖæCÒ&ÖöçF‚ÖVæBÖÆVFvW""À¢6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æUöÖæ–fW7CÖ&6VÆ–æUöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"À¢66†VGVÆS×66†VGVÆU÷F‚À¢'VåöÖæ–fW7G3Õ·'VåöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"f÷"'VåöF—"–â'VåöF—'5ÒÀ¢÷WCÖ÷WBÀ¢’¢v—F‚†÷WBò&ÖöçF‚ÖVæBÖÆVFvW"æ77b"’æ÷Vâ†æWvÆ–æSÒ""ÂVæ6öF–æsÒ'WFbÓ‚"’2†æFÆS ¢6VÆbæ76W'DWVÂ†Æ—7B†77bäF–7E&VFW"††æFÆR’’ÂµÒ¢&W÷'BÒ†÷WBò&ÖöçF‚ÖVæBÖÆVFvW"æÖB"’ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"¢6VÆbæ76W'D–â‚$æòö'6W'fF–öâG&ç6—F–öç2vW&R&V6÷&FVBÖöærF†Rg&÷¦Vâ6†V6·27&÷72f÷W"6GW&W2â"Â&W÷'B¢6VÆbæ76W'Dæ÷D–â‚'F†RvV'6—FRF–Bæ÷B6†ævRâ"Â&W÷'Bæ66VföÆB‚’ ¢FVbFW7E÷Væf–Æ&–Æ—G•ö—5÷&V6÷&FVEööæ6UöæE÷&V6÷fW'•ö—5ö÷6V6öæE÷G&ç6—F–öâ‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢f÷"'VåöF—"ÂF–ÖW7F×ÂWf–FVæ6R–â€¢‡'VåöF—'5³ÒÂ###bÓrÓUC#££¢"Â'F–ÖV÷WBöæR"’À¢‡'VåöF—'5³%ÒÂ###bÓrÓ#%C#££¢"Â'F–ÖV÷WBGvò"’À¢“ ¢'VffW"Ò–òå7G&–æt”ò†æWvÆ–æSÒ""¢w&—FW"Ò77bäF–7Ew&—FW"†'VffW"Âf–VÆFæÖW3×ä55eôd”TÄE2ÂÆ–æWFW&Ö–æF÷#Ò%Æâ"¢w&—FW"çw&—FV†VFW"‚¢w&—FW"çw&—FW&÷r‡°¢'W&Â#¢&‡GG3¢òöW†×ÆRæ6öÒò"Â'F–ÖW7F×#¢F–ÖW7F×Â&6†V6²#¢'F—FÆR"À¢&W‡V7FVB#¢%7&–ævf–VÆB7—7FV×2"Â&ö'6W'fVB#¢'Væf–Æ&ÆR"À¢'7FGW2#¢%Täd”Ä$ÄR"Â&Wf–FVæ6R#¢Wf–FVæ6RÀ¢Ò¢6VÆbå÷&WÆ6U÷'Våö77eöæE÷&V†6‚‡'VåöF—"Â'VffW"ævWGfÇVR‚’¢÷WBÒ&ö÷Bò&ÆVFvW" ¢ç'Vâ„æÖW76R€¢6öÖÖæCÒ&ÖöçF‚ÖVæBÖÆVFvW""À¢6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æUöÖæ–fW7CÖ&6VÆ–æUöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"À¢66†VGVÆS×66†VGVÆU÷F‚À¢'VåöÖæ–fW7G3Õ·'VåöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"f÷"'VåöF—"–â'VåöF—'5ÒÀ¢÷WCÖ÷WBÀ¢’¢v—F‚†÷WBò&ÖöçF‚ÖVæBÖÆVFvW"æ77b"’æ÷Vâ†æWvÆ–æSÒ""ÂVæ6öF–æsÒ'WFbÓ‚"’2†æFÆS ¢&÷w2ÒÆ—7B†77bäF–7E&VFW"††æFÆR’¢6VÆbæ76W'DWVÂ…·&÷u²&WfVçE÷G—R%Òf÷"&÷r–â&÷w5ÒÂ²$$T4ÔUõTäd”Ä$ÄR"Â$d”Ä$ÄUôt”â%Ò¢6VÆbæ76W'DWVÂ…·&÷u²''Vâ%Òf÷"&÷r–â&÷w5ÒÂ²'vVV²Ó""Â'vVV²ÓB%Ò ¢FVbFW7EöÆVFvW%÷fW&–f–W5÷6÷W&6UöÖ&¶F÷våöÖæ–fW7Eö†6…öæE÷W6W5÷¦W&õöæWGv÷&²‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢‡'VåöF—'5³Òò&W†6WF–öç2æÖB"’çw&—FU÷FW‡B‚'F×W&VB"ÂVæ6öF–æsÒ'WFbÓ‚"¢v—F‚Öö6²çF6‚æö&¦V7B‡Â%÷&W6öÇfU÷v—F…öFVFÆ–æR"’2Fç2ÂÖö6²çF6‚æö&¦V7B‡Â&fWF6…÷vR"’2fWF6ƒ ¢v—F‚6VÆbæ76W'E&—6W5&VvW‚‡ä6öæf–tW'&÷"Â&F–vW7B"“ ¢ç'Vâ„æÖW76R€¢6öÖÖæCÒ&ÖöçF‚ÖVæBÖÆVFvW""À¢6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æUöÖæ–fW7CÖ&6VÆ–æUöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"À¢66†VGVÆS×66†VGVÆU÷F‚À¢'VåöÖæ–fW7G3Õ·'VåöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"f÷"'VåöF—"–â'VåöF—'5ÒÀ¢÷WC×&ö÷Bò&ÆVFvW""À¢’¢Fç2æ76W'Eöæ÷Eö6ÆÆVB‚¢fWF6‚æ76W'Eöæ÷Eö6ÆÆVB‚ ¢FVbFW7EöÆVFvW%÷7Fv–æuöf–ÇW&UöÆVfW5öæõö÷WGWEöF—&V7F÷'’‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢÷WBÒ&ö÷Bò&ÆVFvW" ¢v—F‚Öö6²çF6‚æö&¦V7B‡Â%÷w&—FUöÆVFvW%öÖ&¶F÷vâ"Â6–FUöVffV7CÔõ4W'&÷"‚&F—6²gVÆÂ"’“ ¢v—F‚6VÆbæ76W'E&—6W2„õ4W'&÷"“ ¢ç'Vâ„æÖW76R€¢6öÖÖæCÒ&ÖöçF‚ÖVæBÖÆVFvW""À¢6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æUöÖæ–fW7CÖ&6VÆ–æUöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"À¢66†VGVÆS×66†VGVÆU÷F‚À¢'VåöÖæ–fW7G3Õ·'VåöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"f÷"'VåöF—"–â'VåöF—'5ÒÀ¢÷WCÖ÷WBÀ¢’¢6VÆbæ76W'DfÇ6R†÷WBæW†—7G2‚’ ¢FVbFW7EöÆVFvW%÷&V¦V7G5öGWÆ–6FUö§6öåö¶W—5ö&Vf÷&U÷W6–æu÷6÷W&6W2‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢–ÆöBÒ66†VGVÆU÷F‚ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"¢66†VGVÆU÷F‚çw&—FU÷FW‡B€¢–ÆöBç&WÆ6R‚r'W&–öEö–B#¢###bÓr"ÂrÂr'W&–öEö–B#¢'w&öær"Â'W&–öEö–B#¢###bÓr"ÂrÂ’À¢Væ6öF–æsÒ'WFbÓ‚"À¢¢v—F‚6VÆbæ76W'E&—6W5&VvW‚‡ä6öæf–tW'&÷"Â&GWÆ–6FR¥4ôâ¶W’"“ ¢ç'Vâ„æÖW76R€¢6öÖÖæCÒ&ÖöçF‚ÖVæBÖÆVFvW""À¢6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æUöÖæ–fW7CÖ&6VÆ–æUöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"À¢66†VGVÆS×66†VGVÆU÷F‚À¢'VåöÖæ–fW7G3Õ·'VåöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"f÷"'VåöF—"–â'VåöF—'5ÒÀ¢÷WC×&ö÷Bò&ÆVFvW""À¢’ ¢FVbFW7EöÆVFvW%÷&V¦V7G5öÆVv7•÷66†VGVÆVE÷'Vå÷v—F†÷WE÷66†VGVÆUö&–æF–ær‡6VÆb“ ¢v—F‚FV×f–ÆRåFV×÷&'”F—&V7F÷'’‚’2F× ¢&ö÷BÒF‚‡F×¢6öæf–u÷F‚Â&6VÆ–æUöF—"Â66†VGVÆU÷F‚Â'VåöF—'2Ò6VÆbå÷w&—FUöÖöçF‚€¢&ö÷BÂ²%7&–ævf–VÆB7—7FV×2%Ò¢BÀ¢¢&rÒ§6öâæÆöG2†6öæf–u÷F‚ç&VE÷FW‡B†Væ6öF–æsÒ'WFbÓ‚"’¢6frÒçfÆ–FFUö6öæf–r‡&rÂ&W6öÇfW#ÖÆÖ&Fö†÷7C¢²#“2ãƒBã#bã3B%Ò¢ÆöFVBÒåöÆöEö&6VÆ–æR†&6VÆ–æUöF—"ò&&6VÆ–æRæ77b"Âæ6öæf–uöF–vW7B†6fr’¢ÆVv7’Ò&ö÷Bò&ÆVv7’×vVV² ¢&÷rÒä6†V6µ&W7VÇB€¢&‡GG3¢òöW†×ÆRæ6öÒò"Â###bÓrÓ…C#££¢"Â'F—FÆR"À¢%7&–ævf–VÆB7—7FV×2"Â%7&–ævf–VÆB7—7FV×2"Â%52"Â$…DÔÂF—FÆRVÆVÖVçB"À¢¢çw&—FU÷'Våö'F–f7G2†ÆVv7’Â'66†VGVÆVB×&W'Vâ"Â·&÷uÒÂ6frÂ&÷rçF–ÖW7F×ÂÆöFVB¢Öæ–fW7G2Ò¶ÆVv7’ò&÷WGWBÖÖæ–fW7Bæ§6öâ%Ò²°¢'VåöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"f÷"'VåöF—"–â'VåöF—'5³¥Ğ¢Ğ¢v—F‚6VÆbæ76W'E&—6W5&VvW‚‡ä6öæf–tW'&÷"Â'66†VGVÆRÖ&÷VæB"“ ¢ç'Vâ„æÖW76R€¢6öÖÖæCÒ&ÖöçF‚ÖVæBÖÆVFvW""À¢6öæf–sÖ6öæf–u÷F‚À¢&6VÆ–æUöÖæ–fW7CÖ&6VÆ–æUöF—"ò&÷WGWBÖÖæ–fW7Bæ§6öâ"À¢66†VGVÆS×66†VGVÆU÷F‚À¢'VåöÖæ–fW7G3ÖÖæ–fW7G2À¢÷WC×&ö÷Bò&ÆVFvW""À¢’  ¦–bõöæÖUõòÓÒ%õöÖ–åõò# ¢Væ—GFW7BæÖ–â‚ 
+                return None
+
+        started = time.monotonic()
+        with mock.patch.object(qa, "PinnedHTTPSConnection", return_value=SlowHeaderConnection()):
+            result = qa.fetch_page(
+                "https://example.com/",
+                "example.com",
+                0.03,
+                1000,
+                resolver=lambda _host: ["93.184.216.34"],
+            )
+        elapsed = time.monotonic() - started
+        self.assertIsNotNone(result.error)
+        self.assertLess(elapsed, 0.15)
+
+
+class EvaluationTests(unittest.TestCase):
+    def setUp(self):
+        self.page = qa.PageResult(
+            requested_url="https://example.com/",
+            final_url="https://example.com/",
+            status=200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            body=HTML,
+            error=None,
+        )
+
+    def test_all_supported_checks_pass(self):
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        rows = qa.evaluate(cfg, {"home": self.page}, "2026-08-14T12:00:00Z")
+        self.assertEqual({row.status for row in rows}, {"PASS"})
+        self.assertEqual(len(rows), 8)
+
+    def test_fetch_failure_makes_checks_unavailable(self):
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        page = qa.PageResult("https://example.com/", None, None, {}, b"", "timeout")
+        rows = qa.evaluate(cfg, {"home": page}, "2026-08-14T12:00:00Z")
+        self.assertEqual({row.status for row in rows}, {"UNAVAILABLE"})
+        self.assertTrue(all("timeout" in row.evidence for row in rows))
+
+    def test_rerun_compares_normalized_observation_to_baseline(self):
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        baseline = qa.evaluate(cfg, {"home": self.page}, "2026-08-14T12:00:00Z")
+        changed = self.page._replace(body=HTML.replace(b"Springfield Systems", b"Changed Title", 1))
+        rows = qa.evaluate(cfg, {"home": changed}, "2026-08-14T13:00:00Z", baseline=qa.baseline_map(baseline))
+        by_id = {row.check: row for row in rows}
+        self.assertEqual(by_id["title"].status, "DRIFT")
+        self.assertEqual(by_id["status"].status, "PASS")
+        self.assertEqual(by_id["title"].expected, "Springfield Systems")
+
+    def test_hidden_template_and_head_text_are_not_treated_as_page_text(self):
+        body = b"<html><head><title>Hidden title</title></head><body><template>Needle</template><div hidden>Needle</div><div aria-hidden='true'>Needle</div><p>Shown</p></body></html>"
+        page = self.page._replace(body=body)
+        cfg = valid_config()
+        cfg["checks"] = [{"id": "hidden", "url": "home", "type": "text", "value": "Needle", "expected": "absent"}]
+        clean = qa.validate_config(cfg, resolver=lambda _host: ["93.184.216.34"])
+        rows = qa.evaluate(clean, {"home": page}, "2026-08-14T12:00:00Z")
+        self.assertEqual(rows[0].status, "PASS")
+
+    def test_malformed_canonical_and_href_never_crash(self):
+        body = b"<html><head><link rel='canonical' href='https://['></head><body><a href='https://['>x</a></body></html>"
+        parser = qa.HTMLSnapshot("https://example.com/")
+        parser.feed(body.decode())
+        self.assertEqual(parser.canonical, "malformed")
+        self.assertEqual(parser.references, set())
+
+
+class ReportingTests(unittest.TestCase):
+    def test_csv_formula_neutralization_is_lossless_and_collision_safe(self):
+        values = ["=1+1", "+cmd", "-2", "@name", "\tcmd", "\rcmd", "\ncmd", "'=literal", "''already", "normal"]
+        for value in values:
+            encoded = qa.safe_csv_cell(value)
+            self.assertNotIn(encoded[:1], {"=", "+", "-", "@", "\t", "\r", "\n"})
+            self.assertEqual(qa.restore_csv_cell(encoded), value)
+
+    def test_markdown_cells_escape_html_pipes_and_backslashes(self):
+        rendered = qa.markdown_cell("<img src=x>|a\\b\nnext & end")
+        self.assertIn("&lt;img src=x&gt;", rendered)
+        self.assertIn("\\|", rendered)
+        self.assertIn("a\\\\b", rendered)
+        self.assertIn("<br>", rendered)
+        self.assertIn("&amp;", rendered)
+
+    def test_csv_and_markdown_contain_required_fields(self):
+        row = qa.CheckResult(
+            url="https://example.com/",
+            timestamp="2026-08-14T12:00:00Z",
+            check="title",
+            expected="Expected",
+            observed="Actual",
+            status="DRIFT",
+            evidence="HTML title element",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            qa.write_csv(out / "baseline.csv", [row])
+            qa.write_exceptions(out / "exceptions.md", [row])
+            with (out / "baseline.csv").open(newline="", encoding="utf-8") as handle:
+                parsed = list(csv.DictReader(handle))
+            self.assertEqual(parsed[0]["status"], "DRIFT")
+            report = (out / "exceptions.md").read_text(encoding="utf-8")
+            for field in ["URL", "Timestamp", "Check", "Expected", "Observed", "Status", "Evidence"]:
+                self.assertIn(field, report)
+
+    def test_staged_pair_does_not_replace_old_outputs_when_second_write_fails(self):
+        row = qa.CheckResult("https://example.com/", "2026-08-14T12:00:00Z", "title", "x", "x", "PASS", "ok")
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "baseline.csv").write_text("old csv", encoding="utf-8")
+            (out / "exceptions.md").write_text("old md", encoding="utf-8")
+            with mock.patch.object(qa, "write_exceptions", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    qa.write_run_artifacts(out, "baseline", [row], cfg, row.timestamp)
+            self.assertEqual((out / "baseline.csv").read_text(encoding="utf-8"), "old csv")
+            self.assertEqual((out / "exceptions.md").read_text(encoding="utf-8"), "old md")
+
+
+class BaselineProvenanceTests(unittest.TestCase):
+    def test_release_metadata_records_version_and_exact_baseline_lineage(self):
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        baseline_row = qa.CheckResult("https://example.com/", "2026-08-14T12:00:00Z", "status", "200", "200", "PASS", "ok")
+        rerun_row = baseline_row._replace(timestamp="2026-08-14T13:00:00Z")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            baseline_metadata = qa.write_run_artifacts(out, "baseline", [baseline_row], cfg, baseline_row.timestamp)
+            baseline_manifest = json.loads((out / "output-manifest.json").read_text(encoding="utf-8"))
+            baseline_digest = hashlib.sha256((out / "baseline.csv").read_bytes()).hexdigest()
+            loaded = qa._load_baseline(out / "baseline.csv", qa.config_digest(cfg))
+
+            self.assertEqual(baseline_metadata["tool_version"], qa.TOOL_VERSION)
+            self.assertEqual(baseline_manifest["tool_version"], qa.TOOL_VERSION)
+            self.assertEqual(loaded.csv_sha256, baseline_digest)
+            self.assertEqual(loaded.captured_at, baseline_row.timestamp)
+
+            rerun_metadata = qa.write_run_artifacts(
+                out, "rerun", [rerun_row], cfg, rerun_row.timestamp, loaded
+            )
+            rerun_manifest = json.loads((out / "output-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(rerun_metadata["tool_version"], qa.TOOL_VERSION)
+            self.assertEqual(rerun_metadata["baseline_csv_sha256"], baseline_digest)
+            self.assertEqual(rerun_metadata["baseline_captured_at"], baseline_row.timestamp)
+            self.assertEqual(rerun_manifest["tool_version"], qa.TOOL_VERSION)
+
+    def test_rerun_artifacts_require_loaded_baseline_provenance(self):
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        row = qa.CheckResult("https://example.com/", "2026-08-14T13:00:00Z", "status", "200", "200", "PASS", "ok")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(qa.ConfigError, "baseline provenance"):
+                qa.write_run_artifacts(Path(tmp), "rerun", [row], cfg, row.timestamp)
+
+    def test_baseline_is_bound_to_full_normalized_config_digest(self):
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        row = qa.CheckResult("https://example.com/", "2026-08-14T12:00:00Z", "status", "200", "200", "PASS", "ok")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            qa.write_run_artifacts(out, "baseline", [row], cfg, row.timestamp)
+            loaded = qa.load_baseline(out / "baseline.csv", qa.config_digest(cfg))
+            self.assertEqual(loaded[(row.url, row.check)], "200")
+            changed = dict(cfg)
+            changed["timeout_seconds"] = 6.0
+            with self.assertRaisesRegex(qa.ConfigError, "config digest"):
+                qa.load_baseline(out / "baseline.csv", qa.config_digest(changed))
+
+    def test_baseline_schema_status_and_timestamp_are_validated(self):
+        qa.validate_timestamp("2026-08-14T12:00:00Z")
+        with self.assertRaises(qa.ConfigError):
+            qa.validate_timestamp("yesterday")
+        with self.assertRaises(qa.ConfigError):
+            qa.validate_baseline_records([{"url": "x", "timestamp": "yesterday", "check": "x", "expected": "x", "observed": "x", "status": "MAYBE", "evidence": "x"}])
+
+    def test_scheduled_evidence_gate_cannot_be_time_traveled(self):
+        baseline = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
+        scheduled = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(qa.ConfigError, "not open"):
+            qa.enforce_scheduled_evidence_gate(baseline, scheduled, datetime(2026, 8, 15, 12, tzinfo=timezone.utc), 72)
+        qa.enforce_scheduled_evidence_gate(baseline, scheduled, datetime(2026, 8, 17, 12, tzinfo=timezone.utc), 72)
+
+    def test_premature_scheduled_run_performs_zero_dns_or_network_events(self):
+        raw = valid_config()
+        raw["scheduled_evidence_minimum_hours"] = 72
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            baseline_path = root / "baseline.csv"
+            config_path.write_text(json.dumps(raw), encoding="utf-8")
+            baseline_path.write_text("not read before gate", encoding="utf-8")
+            (root / "baseline.meta.json").write_text(
+                json.dumps(
+                    {
+                        "schema": qa.BASELINE_SCHEMA,
+                        "mode": "baseline",
+                        "config_digest": "unused-before-gate",
+                        "csv_sha256": "unused-before-gate",
+                        "fields": qa.CSV_FIELDS,
+                        "row_count": 1,
+                        "captured_at": "2099-01-01T00:00:00Z",
+                        "earliest_scheduled_evidence_at": "2099-01-04T00:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = Namespace(
+                command="scheduled-rerun",
+                config=config_path,
+                baseline=baseline_path,
+                out=root / "out",
+                scheduled_for="2099-01-04T00:00:00Z",
+            )
+            with mock.patch.object(qa.socket, "getaddrinfo") as dns, mock.patch.object(qa, "_open_pinned") as network:
+                with self.assertRaisesRegex(qa.ConfigError, "not open"):
+                    qa.run(args)
+            dns.assert_not_called()
+            network.assert_not_called()
+            self.assertFalse(args.out.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

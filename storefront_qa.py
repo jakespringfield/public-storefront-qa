@@ -27,31 +27,21 @@ from email.message import Message
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Iterable, NamedTuple
-from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 
 MAX_URLS = 6
 MAX_CHECKS = 20
 MAX_TIMEOUT_SECONDS = 20
 MAX_RESPONSE_BYTES = 2_000_000
-MAX_ARTIFACT_CELL_CHARS = MAX_RESPONSE_BYTES * 4
-MAX_URL_CHARS = 4_096
-MAX_CONFIG_VALUE_CHARS = 16_384
 MAX_REDIRECTS = 5
 MAX_GET_ATTEMPTS = 2
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.0.0"
 USER_AGENT = f"Springfield-Public-Storefront-QA/{TOOL_VERSION} (+read-only; public GET)"
 BASELINE_SCHEMA = "public-storefront-qa/baseline-v1"
 RUN_SCHEMA = "public-storefront-qa/run-v1"
 MANIFEST_SCHEMA = "public-storefront-qa/commit-v1"
-LEDGER_SCHEMA = "public-storefront-qa/month-end-ledger-v1"
-MONTH_SCHEDULE_SCHEMA = "public-storefront-qa/monthly-schedule-v1"
 CSV_FIELDS = ["url", "timestamp", "check", "expected", "observed", "status", "evidence"]
-LEDGER_FIELDS = [
-    "run", "captured_at", "previous_captured_at", "url", "check", "baseline_observed",
-    "previous_observed", "previous_status", "observed", "status", "event_type", "evidence",
-    "source_csv_sha256",
-]
 ALLOWED_STATUSES = {"PASS", "DRIFT", "UNAVAILABLE"}
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 CHECK_TYPES = {
@@ -71,25 +61,10 @@ TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 TRANSIENT_STATUSES = {408, 425, 429, 500, 502, 503, 504}
-SURROGATE_PATTERN = re.compile(r"[\uD800-\uDFFF]")
-
-# Generated observation/evidence fields can legitimately approach the bounded
-# response size. Python's much smaller platform default would reject our own
-# valid artifacts during verification.
-csv.field_size_limit(MAX_ARTIFACT_CELL_CHARS)
 
 
 class ConfigError(ValueError):
     pass
-
-
-class UnsafeDestinationError(ConfigError):
-    pass
-
-
-class SafeArgumentParser(argparse.ArgumentParser):
-    def error(self, _message: str) -> None:
-        raise ConfigError("invalid command line; use --help for required arguments")
 
 
 class FetchError(RuntimeError):
@@ -125,28 +100,6 @@ class LoadedBaseline(NamedTuple):
     captured_at: str
 
 
-class VerifiedCapture(NamedTuple):
-    mode: str
-    rows: list[dict[str, str]]
-    csv_sha256: str
-    manifest_sha256: str
-    captured_at: str
-    config_digest: str
-    baseline_csv_sha256: str | None
-    baseline_captured_at: str | None
-    earliest_scheduled_evidence_at: str | None
-    tool_version: str
-    schedule_sha256: str | None
-    window_id: str | None
-    scheduled_for: str | None
-
-
-class LoadedSchedule(NamedTuple):
-    value: dict
-    sha256: str
-    windows_by_id: dict[str, dict]
-
-
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -158,13 +111,6 @@ def validate_timestamp(value: str) -> datetime:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError as exc:
         raise ConfigError("timestamp is not a valid UTC calendar time") from exc
-
-
-def _checked_add_hours(value: datetime, hours: int) -> datetime:
-    try:
-        return value + timedelta(hours=hours)
-    except (OverflowError, ValueError) as exc:
-        raise ConfigError("timestamp arithmetic exceeds the supported time range") from exc
 
 
 def resolve_addresses(host: str) -> list[str]:
@@ -188,12 +134,12 @@ def _validated_addresses(host: str, addresses: Iterable[str]) -> tuple[str, ...]
         try:
             parsed = ipaddress.ip_address(address)
         except ValueError as exc:
-            raise UnsafeDestinationError("resolver returned a non-IP destination") from exc
+            raise ConfigError("resolver returned a non-IP destination") from exc
         if not _is_public_unicast(parsed):
-            raise UnsafeDestinationError("configured domain must resolve only to public IP unicast addresses")
+            raise ConfigError("configured domain must resolve only to public IP unicast addresses")
         clean.append(str(parsed))
     if not clean:
-        raise UnsafeDestinationError("configured domain did not resolve to an address")
+        raise ConfigError("configured domain did not resolve to an address")
     return tuple(sorted(set(clean), key=lambda item: (ipaddress.ip_address(item).version, ipaddress.ip_address(item).packed)))
 
 
@@ -224,7 +170,10 @@ def _resolve_with_deadline(host: str, resolver: Callable[[str], list[str]], dead
         raise TransientFetchError("end-to-end deadline expired during DNS resolution") from exc
     if not succeeded:
         raise TransientFetchError("DNS resolution failed") from result
-    return _validated_addresses(host, result)
+    try:
+        return _validated_addresses(host, result)
+    except ConfigError as exc:
+        raise FetchError(str(exc)) from exc
 
 
 def _decode_route(path: str) -> str:
@@ -271,8 +220,6 @@ def validate_public_url(
 ) -> str:
     if not isinstance(url, str) or not url:
         raise ConfigError("URL must be a non-empty string")
-    if len(url) > MAX_URL_CHARS:
-        raise ConfigError(f"URL is too long; maximum is {MAX_URL_CHARS} characters")
     if "?" in url or "#" in url:
         raise ConfigError("URL query and fragment delimiters are forbidden")
     try:
@@ -313,29 +260,21 @@ def _expected_string(check: dict) -> str:
             raise ConfigError(f"check {check['id']} expected must be an HTTP status integer")
         return str(value)
     if kind in {"structured-data-presence", "text", "selector", "asset-reference"}:
-        if not isinstance(value, str) or value not in {"present", "absent"}:
+        if value not in {"present", "absent"}:
             raise ConfigError(f"check {check['id']} expected must be present or absent")
         return value
     if kind == "robots-indexability":
-        if not isinstance(value, str) or value not in {"indexable", "noindex"}:
+        if value not in {"indexable", "noindex"}:
             raise ConfigError(f"check {check['id']} expected must be indexable or noindex")
         return value
     if not isinstance(value, str):
         raise ConfigError(f"check {check['id']} expected must be a string")
-    if len(value) > MAX_CONFIG_VALUE_CHARS:
-        raise ConfigError(f"check {check['id']} expected is too long")
     return value
 
 
-def validate_config(
-    raw: dict,
-    resolver: Callable[[str], list[str]] = resolve_addresses,
-    *,
-    check_dns: bool = True,
-) -> dict:
+def validate_config(raw: dict, resolver: Callable[[str], list[str]] = resolve_addresses) -> dict:
     if not isinstance(raw, dict):
         raise ConfigError("config root must be an object")
-    _validate_unicode_scalar_strings(raw, "config")
     domain = raw.get("domain")
     if not isinstance(domain, str) or not domain.strip():
         raise ConfigError("domain must be a non-empty hostname")
@@ -345,11 +284,10 @@ def validate_config(
     timeout = raw.get("timeout_seconds", 10)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
         raise ConfigError(f"timeout_seconds must be between 1 and {MAX_TIMEOUT_SECONDS}")
-    if check_dns:
-        try:
-            _resolve_with_deadline(domain, resolver, time.monotonic() + float(timeout))
-        except FetchError as exc:
-            raise ConfigError(str(exc)) from exc
+    try:
+        _resolve_with_deadline(domain, resolver, time.monotonic() + float(timeout))
+    except FetchError as exc:
+        raise ConfigError(str(exc)) from exc
     max_bytes = raw.get("max_response_bytes", 1_000_000)
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or not 1 <= max_bytes <= MAX_RESPONSE_BYTES:
         raise ConfigError(f"max_response_bytes must be between 1 and {MAX_RESPONSE_BYTES}")
@@ -381,6 +319,687 @@ def validate_config(
         if check_id in check_ids:
             raise ConfigError(f"duplicate check id: {check_id}")
         check_ids.add(check_id)
-        url_id = _require_id(check.get("url"), f"check {check_id} URL id")
+        url_id = check.get("url")
         if url_id not in url_ids:
-            raise ConfigError(f"check {check_id} ×Î¹îÚ$z{-®éÜj×'Vâ–â'Vç7Ð¢÷&FW&VE÷'Vç2Ò¶'•÷v–æF÷u·v–æF÷u²&–B%ÕÒf÷"v–æF÷r–â66†VGVÆRçfÇVU²'v–æF÷w2%ÕÐ¢Æ–æW2Ò°¢"2V&Æ–27F÷&Vg&öçBÖöçF‚ÖVæB6†ævRÆVFvW""Â""À¢$f÷W"fW&–f–VBÂ66†VGVÆRÖ&÷VæB&W'Vç2öböæRg&÷¦Vâ&6VÆ–æR&R–çfVçF÷&–VB&VÆ÷râöæÇ’ö'6W'fF–öâ÷"f–Æ&–Æ—G’G&ç6—F–öç2V"–âF†R6†ævRF&ÆRâ"Â""À¢$'6Væ6Röb&÷rÖVç2æòG&ç6—F–öâv2&V6÷&FVBÖöærF†Rg&÷¦Vâ6†V6·2BF†W6R6GW&W2â—BFöW2æ÷B&÷fRF†BF†RvV'6—FRF–Bæ÷B6†ævRÂ÷"W7F&Æ—6‚WF–ÖRÂ6W6F–öâÂ6÷'&V7FæW72Â6öçfW'6–öâVffV7BÂ÷"v†öÆR×6—FR6÷fW&vRâ"Â""À¢b"Ò6W'f–6RW&–öC¢¶Ö&¶F÷våö6VÆÂ‡66†VGVÆRçfÇVU²wW&–öE÷7F'G5öBuÒ—ÖF‡&÷Vv‚¶Ö&¶F÷våö6VÆÂ‡66†VGVÆRçfÇVU²wW&–öEöVæG5öBuÒ—Ö"À¢b"Ò66†VGVÆR4„Ó#Sc¢·66†VGVÆRç6†#SgÖ"À¢b"Ò&6VÆ–æR6GW&VC¢¶Ö&¶F÷våö6VÆÂ†&6VÆ–æRæ6GW&VEöB—Ö"À¢b"Ò&6VÆ–æR55b4„Ó#Sc¢¶&6VÆ–æRæ77e÷6†#SgÖ"À¢b"Òg&÷¦Vâ6öæf–r4„Ó#Sc¢¶&6VÆ–æRæ6öæf–uöF–vW7GÖ"Â""À¢"226GW&R–çfVçF÷'’"Â""À¢'Âv–æF÷rÂ÷Vç2Â66†VGVÆVBÂ6Æ÷6W2Â6GW&VBÂ52ÂE$”eBÂTäd”Ä$ÄRÂ&W'Vâ55b4„Ó#SbÂÖæ–fW7B4„Ó#SbÂ"À¢'ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒÓ§ÂÒÒÓ§ÂÒÒÓ§ÂÒÒ×ÂÒÒ×Â"À¢Ð¢f÷"v–æF÷rÂ'Vâ–â¦—‡66†VGVÆRçfÇVU²'v–æF÷w2%ÒÂ÷&FW&VE÷'Vç2Â7G&–7CÕG'VR“ ¢6÷VçG2Ò·7FGW3¢7VÒ‡&÷u²'7FGW2%ÒÓÒ7FGW2f÷"&÷r–â'Vâç&÷w2’f÷"7FGW2–âÄÄõtTEõ5DEU4U7Ð¢Æ–æW2æVæB€¢b'Â¶Ö&¶F÷våö6VÆÂ‡v–æF÷u²v–BuÒ—ÒÂ¶Ö&¶F÷våö6VÆÂ‡v–æF÷u²v÷Vç5öBuÒ—ÒÂ¶Ö&¶F÷våö6VÆÂ‡v–æF÷u²w66†VGVÆVEöf÷"uÒ—ÒÂ ¢b'¶Ö&¶F÷våö6VÆÂ‡v–æF÷u²v6Æ÷6W5öBuÒ—ÒÂ¶Ö&¶F÷våö6VÆÂ‡'Vâæ6GW&VEöB—ÒÂ¶6÷VçG5²u52u×ÒÂ¶6÷VçG5²tE$”eBu×ÒÂ ¢b'¶6÷VçG5²uTäd”Ä$ÄRu×ÒÂ·'Vâæ77e÷6†#SgÖÂ·'VâæÖæ–fW7E÷6†#SgÖÂ ¢¢Æ–æW2æW‡FVæB…°¢""Â"22&V6÷&FVBG&ç6—F–öç2"Â""À¢'Â'VâÂ7W'&VçB6GW&RÂ&Wf–÷W26GW&RÂU$ÂÂ6†V6²Â&6VÆ–æRö'6W'fF–öâÂ&Wf–÷W2ö'6W'fF–öâÂ&Wf–÷W27FGW2Âö'6W'fF–öâÂ7FGW2ÂWfVçBÂWf–FVæ6RÂ6÷W&6R&W'Vâ4„Ó#SbÂ"À¢'ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×ÂÒÒ×Â"À¢Ò¢–b&÷w3 ¢f÷"&÷r–â&÷w3 ¢fÇVW2Ò°¢&÷u²''Vâ%ÒÂ&÷u²&6GW&VEöB%ÒÂ&÷u²'&Wf–÷W5ö6GW&VEöB%ÒÂ&÷u²'W&Â%ÒÂ&÷u²&6†V6²%ÒÀ¢&÷u²&&6VÆ–æUöö'6W'fVB%ÒÂ&÷u²'&Wf–÷W5öö'6W'fVB%ÒÂ&÷u²'&Wf–÷W5÷7FGW2%ÒÂ&÷u²&ö'6W'fVB%ÒÀ¢&÷u²'7FGW2%ÒÂ&÷u²&WfVçE÷G—R%ÒÂ&÷u²&Wf–FVæ6R%ÒÂ&÷u²'6÷W&6Uö77e÷6†#Sb%ÒÀ¢Ð¢Æ–æW2æVæB‚'Â"²"Â"æ¦ö–â†Ö&¶F÷våö6VÆÂ‡fÇVR’f÷"fÇVR–âfÇVW2’²"Â"¢VÇ6S ¢Æ–æW2æVæB‚'ÂÒÂÒÂÒÂÒÂÒÂÒÂÒÂÒÂÒÂÒÂäôäRÂæòö'6W'fF–öâG&ç6—F–öç2vW&R&V6÷&FVBÖöærF†Rg&÷¦Vâ6†V6·27&÷72f÷W"6GW&W2âÂÒÂ"¢F‚çw&—FU÷FW‡B‚%Æâ"æ¦ö–â†Æ–æW2’²%Æâ"ÂVæ6öF–æsÒ'WFbÓ‚"  ¦FVbw&—FUöÖöçF…öVæEöÆVFvW"€¢÷WC¢F‚À¢6öæf–s¢F–7BÀ¢&6VÆ–æS¢fW&–f–VD6GW&RÀ¢'Vç3¢Æ—7EµfW&–f–VD6GW&UÒÀ¢66†VGVÆS¢ÆöFVE66†VGVÆRÀ¢æ÷s¢FFWF–ÖRÂæöæRÒæöæRÀ¢’ÓâF–7C ¢–b÷WBæW†—7G2‚“ ¢&—6R6öæf–tW'&÷"‚&ÖöçF‚ÖVæBÆVFvW"&WV—&W2g&W6‚÷WGWBF—&V7F÷'’"¢&÷w2Òö'V–ÆEöÖöçF…öVæEöÆVFvW"†&6VÆ–æRÂ'Vç2Â66†VGVÆRÂæ÷sÖæ÷r¢'•÷v–æF÷rÒ·'Vâçv–æF÷uö–C¢'Vâf÷"'Vâ–â'Vç7Ð¢÷&FW&VE÷'Vç2Ò¶'•÷v–æF÷u·v–æF÷u²&–B%ÕÒf÷"v–æF÷r–â66†VGVÆRçfÇVU²'v–æF÷w2%ÕÐ¢÷WBç&VçBæÖ¶F—"‡&VçG3ÕG'VRÂW†—7Eöö³ÕG'VR¢7FvRÒF‚‡FV×f–ÆRæÖ¶GFV×‡&Vf—ƒÖb"ç¶÷WBææÖWÒç7FvRÒ"ÂF—#Ö÷WBç&VçB’¢F&vWG2Ò²&ÖöçF‚ÖVæBÖÆVFvW"æ77b"Â&ÖöçF‚ÖVæBÖÆVFvW"æÖB"Â&ÖöçF‚ÖVæBÖÆVFvW"æÖWFæ§6öâ"Â&÷WGWBÖÖæ–fW7Bæ§6öâ%Ð¢G'“ ¢77e÷7FvRÒ7FvRòF&vWG5³Ð¢ÖE÷7FvRÒ7FvRòF&vWG5³Ð¢ÖWF÷7FvRÒ7FvRòF&vWG5³%Ð¢÷w&—FUöÆVFvW%ö77b†77e÷7FvRÂ&÷w2¢÷w&—FUöÆVFvW%öÖ&¶F÷vâ†ÖE÷7FvRÂ&÷w2Â&6VÆ–æRÂ÷&FW&VE÷'Vç2Â66†VGVÆR¢ÖWFFFÒ°¢'66†VÖ#¢ÄTDtU%õ44„TÔÀ¢&ÖöFR#¢&ÖöçF‚ÖVæBÖÆVFvW""À¢'FööÅ÷fW'6–öâ#¢DôôÅõdU%4”ôâÀ¢&Wf–FVæ6Uö6Æ72#¢&f÷W"×66†VGVÆVB×'VâÖ6†ævRÖöæÇ’ÖÆVFvW""À¢&vVæW&FVEöB#¢WF5÷F–ÖW7F×‚’À¢&FöÖ–â#¢6öæf–u²&FöÖ–â%ÒÀ¢&6öæf–uöF–vW7B#¢&6VÆ–æRæ6öæf–uöF–vW7BÀ¢'66†VGVÆU÷6†#Sb#¢66†VGVÆRç6†#SbÀ¢'W&–öEö–B#¢66†VGVÆRçfÇVU²'W&–öEö–B%ÒÀ¢'W&–öE÷7F'G5öB#¢66†VGVÆRçfÇVU²'W&–öE÷7F'G5öB%ÒÀ¢'W&–öEöVæG5öB#¢66†VGVÆRçfÇVU²'W&–öEöVæG5öB%ÒÀ¢&&6VÆ–æUö77e÷6†#Sb#¢&6VÆ–æRæ77e÷6†#SbÀ¢&&6VÆ–æUöÖæ–fW7E÷6†#Sb#¢&6VÆ–æRæÖæ–fW7E÷6†#SbÀ¢&&6VÆ–æUö6GW&VEöB#¢&6VÆ–æRæ6GW&VEöBÀ¢&&6VÆ–æU÷FööÅ÷fW'6–öâ#¢&6VÆ–æRçFööÅ÷fW'6–öâÀ¢&77e÷6†#Sb#¢÷6†#Seöf–ÆR†77e÷7FvR’À¢''Våö6÷VçB#¢ÆVâ†÷&FW&VE÷'Vç2’À¢'&÷uö6÷VçB#¢ÆVâ‡&÷w2’À¢&f–VÆG2#¢ÄTDtU%ôd”TÄE2À¢'6÷W&6U÷'Vç2#¢°¢°¢'v–æF÷uö–B#¢v–æF÷u²&–B%ÒÀ¢&÷Vç5öB#¢v–æF÷u²&÷Vç5öB%ÒÀ¢'66†VGVÆVEöf÷"#¢v–æF÷u²'66†VGVÆVEöf÷"%ÒÀ¢&6Æ÷6W5öB#¢v–æF÷u²&6Æ÷6W5öB%ÒÀ¢&6GW&VEöB#¢'Vâæ6GW&VEöBÀ¢'&W'Våö77e÷6†#Sb#¢'Vâæ77e÷6†#SbÀ¢&Öæ–fW7E÷6†#Sb#¢'VâæÖæ–fW7E÷6†#SbÀ¢'FööÅ÷fW'6–öâ#¢'VâçFööÅ÷fW'6–öâÀ¢&6GW&Uö6ö×ÆWFR#¢G'VRÀ¢&†5öW†6WF–öç2#¢ç’‡&÷u²'7FGW2%ÒÒ%52"f÷"&÷r–â'Vâç&÷w2’À¢&6÷VçG2#¢·7FGW3¢7VÒ‡&÷u²'7FGW2%ÒÓÒ7FGW2f÷"&÷r–â'Vâç&÷w2’f÷"7FGW2–â6÷'FVB„ÄÄõtTEõ5DEU4U2—ÒÀ¢Ð¢f÷"v–æF÷rÂ'Vâ–â¦—‡66†VGVÆRçfÇVU²'v–æF÷w2%ÒÂ÷&FW&VE÷'Vç2Â7G&–7CÕG'VR¢ÒÀ¢&6Æ–ÕöÆ–Ö—B#¢$–çFVw&—G’ÖÆ–æ¶VBV&Æ–27FF–2ö'6W'fF–öç2öæÇ“²æ÷BWF†VçF–6—G’Â6öçF–çV÷W2Ööæ—F÷&–ærÂv†öÆR×6—FR6÷fW&vRÂWF–ÖRÂ6W6F–öâÂ÷"'W6–æW72–×7Bâ"À¢Ð¢÷w&—FUö§6öâ†ÖWF÷7FvRÂÖWFFF¢Öæ–fW7BÒ°¢'66†VÖ#¢Ôä”dU5Eõ44„TÔÀ¢&ÖöFR#¢&ÖöçF‚ÖVæBÖÆVFvW""À¢'FööÅ÷fW'6–öâ#¢DôôÅõdU%4”ôâÀ¢&6öÖÖ—GFVEöB#¢WF5÷F–ÖW7F×‚’À¢&f–ÆW2#¢¶æÖS¢÷6†#Seöf–ÆR‡7FvRòæÖR’f÷"æÖR–âF&vWG5³¢Ó×ÒÀ¢Ð¢÷w&—FUö§6öâ‡7FvRò&÷WGWBÖÖæ–fW7Bæ§6öâ"ÂÖæ–fW7B¢–b÷WBæW†—7G2‚“ ¢&—6R6öæf–tW'&÷"‚&ÖöçF‚ÖVæBÆVFvW"÷WGWBF—&V7F÷'’V&VBGW&–ær7Fv–ær"¢÷2ç&VæÖR‡7FvRÂ÷WB¢&WGW&âÖWFFF¢f–æÆÇ“ ¢–b7FvRæW†—7G2‚“ ¢6‡WF–Âç&×G&VR‡7FvRÂ–væ÷&UöW'&÷'3ÕG'VR  ¦FVb÷'VåöÖöçF…öVæEöÆVFvW"†&w3¢&w'6RäæÖW76R’Óâ–çC ¢–bÆVâ†&w2ç'VåöÖæ–fW7G2’ÒC ¢&—6R6öæf–tW'&÷"‚&ÖöçF‚ÖVæBÆVFvW"&WV—&W2W†7FÇ’f÷W"Ò×'VâÖÖæ–fW7B–çWG2"¢–çWG2Ò¶&w2æ&6VÆ–æUöÖæ–fW7Bç&W6öÇfR‚’Â¢‡F‚ç&W6öÇfR‚’f÷"F‚–â&w2ç'VåöÖæ–fW7G2•Ð¢–bÆVâ‡6WB†–çWG2’’ÒS ¢&—6R6öæf–tW'&÷"‚&ÖöçF‚ÖVæBÆVFvW"6÷W&6RÖæ–fW7G2×W7B&RVæ—VR"¢÷WE÷&W6öÇfVBÒ&w2æ÷WBç&W6öÇfR‚¢'VæFÆUöF—&V7F÷&–W2Ò·F‚ç&VçBf÷"F‚–â–çWG7Ð¢æW7FVEö–åö'VæFÆRÒç’€¢÷WE÷&W6öÇfVBÓÒF—&V7F÷'’÷"F—&V7F÷'’–â÷WE÷&W6öÇfVBç&VçG0¢f÷"F—&V7F÷'’–â'VæFÆUöF—&V7F÷&–W0¢¢–bæW7FVEö–åö'VæFÆR÷"÷WE÷&W6öÇfVB–â¶&w2æ6öæf–rç&W6öÇfR‚’Â&w2ç66†VGVÆRç&W6öÇfR‚’Â¦–çWG7Ó ¢&—6R6öæf–tW'&÷"‚&ÖöçF‚ÖVæBÆVFvW"÷WGWB×W7Bæ÷BÆ–2â–çWB"¢&rÒ÷7G&–7Eö§6öåöö&¦V7B†&w2æ6öæf–rç&VEö'—FW2‚’Â&6öæf–r"¢6öæf–rÒfÆ–FFUö6öæf–r‡&rÂ6†V6µöFç3ÔfÇ6R¢&6VÆ–æRÒöÆöE÷fW&–f–VEö6GW&R†&w2æ&6VÆ–æUöÖæ–fW7BÂ&&6VÆ–æR"¢÷&WV—&U÷fW&–f–VEö&6VÆ–æUöÖF6†W5ö6öæf–r€¢&6VÆ–æRÂ6öæf–rÂ&ÖöçF‚ÖVæBÆVFvW"&6VÆ–æRFöW2æ÷BÖF6‚F†Rg&÷¦Vâ6öæf–r"À¢¢66†VGVÆRÒöÆöEöÖöçF…÷66†VGVÆR†&w2ç66†VGVÆRÂ6öæf–rÂ&6VÆ–æR¢'Vç2ÒµöÆöE÷fW&–f–VEö6GW&R‡F‚Â'66†VGVÆVB×&W'Vâ"’f÷"F‚–â&w2ç'VåöÖæ–fW7G5Ð¢ÖWFFFÒw&—FUöÖöçF…öVæEöÆVFvW"†&w2æ÷WBÂ6öæf–rÂ&6VÆ–æRÂ'Vç2Â66†VGVÆR¢&–çB†§6öâæGV×2‡°¢&÷WGWB#¢7G"†&w2æ÷WBò&ÖöçF‚ÖVæBÖÆVFvW"æ77b"’À¢'&W÷'B#¢7G"†&w2æ÷WBò&ÖöçF‚ÖVæBÖÆVFvW"æÖB"’À¢&ÖWFFF#¢ÖWFFFÀ¢ÒÂ6÷'Eö¶W—3ÕG'VR’¢&WGW&â   ¦FVb÷'Vå÷66†VGVÆUöF–vW7B†&w3¢&w'6RäæÖW76R’Óâ–çC ¢&rÒ÷7G&–7Eö§6öåöö&¦V7B†&w2æ6öæf–rç&VEö'—FW2‚’Â&6öæf–r"¢6öæf–rÒfÆ–FFUö6öæf–r‡&rÂ6†V6µöFç3ÔfÇ6R¢&6VÆ–æRÒöÆöE÷fW&–f–VEö6GW&R†&w2æ&6VÆ–æUöÖæ–fW7BÂ&&6VÆ–æR"¢÷&WV—&U÷fW&–f–VEö&6VÆ–æUöÖF6†W5ö6öæf–r€¢&6VÆ–æRÂ6öæf–rÂ'66†VGVÆR&6VÆ–æRFöW2æ÷BÖF6‚F†Rg&÷¦Vâ6öæf–r"À¢¢66†VGVÆRÒöÆöEöÖöçF…÷66†VGVÆR†&w2ç66†VGVÆRÂ6öæf–rÂ&6VÆ–æR¢&–çB†§6öâæGV×2‡°¢'66†VGVÆU÷6†#Sb#¢66†VGVÆRç6†#SbÀ¢'W&–öEö–B#¢66†VGVÆRçfÇVU²'W&–öEö–B%ÒÀ¢'W&–öE÷7F'G5öB#¢66†VGVÆRçfÇVU²'W&–öE÷7F'G5öB%ÒÀ¢'W&–öEöVæG5öB#¢66†VGVÆRçfÇVU²'W&–öEöVæG5öB%ÒÀ¢'v–æF÷w2#¢66†VGVÆRçfÇVU²'v–æF÷w2%ÒÀ¢ÒÂ6÷'Eö¶W—3ÕG'VR’¢&WGW&â   ¦FVbö6GW&U÷vW2€¢6öæf–s¢F–7BÀ¢¢À¢6Æ÷6W5öC¢FFWF–ÖRÂæöæRÒæöæRÀ¢æ÷u÷&÷f–FW#¢6ÆÆ&ÆUµµÒÂFFWF–ÖUÒÂæöæRÒæöæRÀ¢’ÓâF–7E·7G"ÂvU&W7VÇEÓ ¢7W'&VçE÷F–ÖRÒæ÷u÷&÷f–FW"÷"†ÆÖ&F¢FFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2’¢vW3¢F–7E·7G"ÂvU&W7VÇEÒÒ·Ð¢f÷"VçG'’–â6öæf–u²'W&Ç2%Ó ¢F–ÖV÷WBÒfÆöB†6öæf–u²'F–ÖV÷WE÷6V6öæG2%Ò¢–b6Æ÷6W5öB—2æ÷BæöæS ¢&VÖ–æ–ærÒ†6Æ÷6W5öBÒ7W'&VçE÷F–ÖR‚’’çF÷FÅ÷6V6öæG2‚¢–b&VÖ–æ–ærÃÒ ¢&—6R6öæf–tW'&÷"‚&ÖöçF†Ç’66†VGVÆVB&W'Vâv–æF÷r6Æ÷6VB&Vf÷&RÆÂtUG27F'FVB"¢F–ÖV÷WBÒÖ–â‡F–ÖV÷WBÂ&VÖ–æ–ær¢vW5¶VçG'•²&–B%ÕÒÒfWF6…÷vR€¢VçG'•²'W&Â%ÒÂ6öæf–u²&FöÖ–â%ÒÂF–ÖV÷WBÂ6öæf–u²&Ö…÷&W7öç6Uö'—FW2%ÒÀ¢¢&WGW&âvW0  ¦FVb'Vâ†&w3¢&w'6RäæÖW76R’Óâ–çC ¢ÖöFRÒ&w2æ6öÖÖæ@¢–bÖöFRÓÒ'66†VGVÆRÖF–vW7B# ¢&WGW&â÷'Vå÷66†VGVÆUöF–vW7B†&w2¢–bÖöFRÓÒ&ÖöçF‚ÖVæBÖÆVFvW"# ¢&WGW&â÷'VåöÖöçF…öVæEöÆVFvW"†&w2¢&rÒ÷7G&–7Eö§6öåöö&¦V7B†&w2æ6öæf–rç&VEö'—FW2‚’Â&6öæf–r"¢ÖöçF†Ç•ö6öçFW‡BÒæöæP¢–bÖöFRÓÒ'66†VGVÆVB×&W'Vâ# ¢–bvWFGG"†&w2Â'66†VGVÆR"ÂæöæR’—2æ÷BæöæS ¢–bæ÷BvWFGG"†&w2Â'v–æF÷r"ÂæöæR“ ¢&—6R6öæf–tW'&÷"‚"Ò×v–æF÷r—2&WV—&VBv—F‚Ò×66†VGVÆR"¢ÖöçF†Ç•ö6öçFW‡BÒöÖöçF†Ç•÷66†VGVÆVE÷&VfÆ–v‡B€¢&rÂ&w2æ&6VÆ–æRÂ&w2ç66†VGVÆRÂ&w2çv–æF÷rÂ&w2æ÷WBÀ¢¢VÇ6S ¢–bvWFGG"†&w2Â'v–æF÷r"ÂæöæR“ ¢&—6R6öæf–tW'&÷"‚"Ò×v–æF÷rÖ’&RW6VBöæÇ’v—F‚Ò×66†VGVÆR"¢÷66†VGVÆVE÷&VfÆ–v‡B‡&rÂ&w2æ&6VÆ–æRÂ&w2ç66†VGVÆVEöf÷"¢6öæf–rÒfÆ–FFUö6öæf–r‡&rÂ6†V6µöFç3ÖÖöFRÓÒ&&6VÆ–æR"¢ÆöFVEö&6VÆ–æRÒæöæP¢&6VÆ–æRÒæöæP¢–bÖöFR–â²'&W'Vâ"Â'66†VGVÆVB×&W'Vâ'Ó ¢–bÖöçF†Ç•ö6öçFW‡B—2æ÷BæöæS ¢÷&VfÆ–v‡Eö6öæf–rÂfW&–f–VEö&6VÆ–æRÂ÷66†VGVÆRÂ÷v–æF÷rÒÖöçF†Ç•ö6öçFW‡@¢–bfW&–f–VEö&6VÆ–æRæ6öæf–uöF–vW7BÒ6öæf–uöF–vW7B†6öæf–r“ ¢&—6R6öæf–tW'&÷"‚&ÖöçF†Ç’66†VGVÆVB&W'Vâ6öæf–r6†ævVBgFW"&VfÆ–v‡B"¢ÆöFVEö&6VÆ–æRÒÆöFVD&6VÆ–æR€¢²‡&÷u²'W&Â%ÒÂ&÷u²&6†V6²%Ò“¢&÷u²&ö'6W'fVB%Òf÷"&÷r–âfW&–f–VEö&6VÆ–æRç&÷w7ÒÀ¢fW&–f–VEö&6VÆ–æRæ77e÷6†#SbÀ¢fW&–f–VEö&6VÆ–æRæ6GW&VEöBÀ¢¢VÇ6S ¢ÆöFVEö&6VÆ–æRÒöÆöEö&6VÆ–æR€¢&w2æ&6VÆ–æRÀ¢6öæf–uöF–vW7B†6öæf–r’À¢ö6öæf–uö¶W—2†6öæf–r’À¢ö6öæf–uöW‡V7FF–öç2†6öæf–r’À¢¢&6VÆ–æRÒÆöFVEö&6VÆ–æRæö'6W'fF–öç0¢F–ÖW7F×ÒæöæR–bÖöçF†Ç•ö6öçFW‡B—2æ÷BæöæRVÇ6RWF5÷F–ÖW7F×‚¢6Æ÷6W5öBÒæöæP¢–bÖöçF†Ç•ö6öçFW‡B—2æ÷BæöæS ¢6Æ÷6W5öBÒfÆ–FFU÷F–ÖW7F×†ÖöçF†Ç•ö6öçFW‡E³5Õ²&6Æ÷6W5öB%Ò¢vW2Òö6GW&U÷vW2†6öæf–rÂ6Æ÷6W5öCÖ6Æ÷6W5öB¢66†VGVÆUö&–æF–ærÒæöæP¢–bÖöçF†Ç•ö6öçFW‡B—2æ÷BæöæS ¢÷&VfÆ–v‡Eö6öæf–rÂ÷fW&–f–VEö&6VÆ–æRÂ66†VGVÆRÂv–æF÷rÒÖöçF†Ç•ö6öçFW‡@¢6GW&VE÷F–ÖRÒFFWF–ÖRææ÷r‡F–ÖW¦öæRçWF2’ç&WÆ6R†Ö–7&÷6V6öæCÓ¢–bæ÷BfÆ–FFU÷F–ÖW7F×‡v–æF÷u²'66†VGVÆVEöf÷"%Ò’ÃÒ6GW&VE÷F–ÖRÂfÆ–FFU÷F–ÖW7F×‡v–æF÷u²&6Æ÷6W5öB%Ò“ ¢&—6R6öæf–tW'&÷"‚&ÖöçF†Ç’66†VGVÆVB&W'VâÆVgB—G2w&VVBv–æF÷r&Vf÷&R6GW&R6ö×ÆWFVB"¢F–ÖW7F×Ò6GW&VE÷F–ÖRç7G&gF–ÖR‚"U’ÒVÒÒVEBTƒ¢TÓ¢U5¢"¢66†VGVÆUö&–æF–ærÒ°¢'66†VGVÆU÷6†#Sb#¢66†VGVÆRç6†#SbÀ¢'v–æF÷uö–B#¢v–æF÷u²&–B%ÒÀ¢'66†VGVÆVEöf÷"#¢v–æF÷u²'66†VGVÆVEöf÷"%ÒÀ¢Ð¢&÷w2ÒWfÇVFR†6öæf–rÂvW2ÂF–ÖW7F×Â&6VÆ–æR¢ÖWFFFÒw&—FU÷'Våö'F–f7G2€¢&w2æ÷WBÂÖöFRÂ&÷w2Â6öæf–rÂF–ÖW7F×ÂÆöFVEö&6VÆ–æRÂ66†VGVÆUö&–æF–ærÀ¢¢77eöæÖRÒ&&6VÆ–æRæ77b"–bÖöFRÓÒ&&6VÆ–æR"VÇ6R'&W'Vâæ77b ¢6÷VçG2Ò·7FGW3¢7VÒ‡&÷rç7FGW2ÓÒ7FGW2f÷"&÷r–â&÷w2’f÷"7FGW2–â‚%52"Â$E$”eB"Â%Täd”Ä$ÄR"—Ð¢&–çB†§6öâæGV×2‡²&÷WGWB#¢7G"†&w2æ÷WBò77eöæÖR’Â&W†6WF–öç2#¢7G"†&w2æ÷WBò&W†6WF–öç2æÖB"’Â&ÖWFFF#¢ÖWFFFÂ¢¦6÷VçG7ÒÂ6÷'Eö¶W—3ÕG'VR’¢&WGW&â–bæ÷B6÷VçG5²$E$”eB%ÒæBæ÷B6÷VçG5²%Täd”Ä$ÄR%ÒVÇ6R   ¦FVb'V–ÆE÷'6W"‚’Óâ&w'6Rä&wVÖVçE'6W# ¢'6W"Ò6fT&wVÖVçE'6W"†FW67&—F–öãÕõöFö5õò¢7V''6W'2Ò'6W"æFE÷7V''6W'2†FW7CÒ&6öÖÖæB"Â&WV—&VCÕG'VR¢f÷"6öÖÖæB–â‚&&6VÆ–æR"Â'&W'Vâ"Â'66†VGVÆVB×&W'Vâ"“ ¢7V"Ò7V''6W'2æFE÷'6W"†6öÖÖæB¢7V"æFEö&wVÖVçB‚"ÒÖ6öæf–r"Â&WV—&VCÕG'VRÂG—SÕF‚¢7V"æFEö&wVÖVçB‚"ÒÖ÷WB"Â&WV—&VCÕG'VRÂG—SÕF‚¢–b6öÖÖæB–â²'&W'Vâ"Â'66†VGVÆVB×&W'Vâ'Ó ¢7V"æFEö&wVÖVçB‚"ÒÖ&6VÆ–æR"Â&WV—&VCÕG'VRÂG—SÕF‚¢–b6öÖÖæBÓÒ'66†VGVÆVB×&W'Vâ# ¢F–Ö–ærÒ7V"æFEö×WGVÆÇ•öW†6ÇW6—fUöw&÷W‡&WV—&VCÕG'VR¢F–Ö–æræFEö&wVÖVçB‚"Ò×66†VGVÆVBÖf÷""Â†VÇÒ%UD2$d2333’6V6öæBB÷"gFW"F†RÖ–æ–×VÒ&6VÆ–æRvR"¢F–Ö–æræFEö&wVÖVçB‚"Ò×66†VGVÆR"ÂG—SÕF‚Â†VÇÒ&g&÷¦Vâf÷W"×v–æF÷rÖöçF†Ç’66†VGVÆR¥4ôâ"¢7V"æFEö&wVÖVçB‚"Ò×v–æF÷r"Â†VÇÒ'v–æF÷r–Bg&öÒÒ×66†VGVÆR"¢ÆVFvW"Ò7V''6W'2æFE÷'6W"‚&ÖöçF‚ÖVæBÖÆVFvW""¢ÆVFvW"æFEö&wVÖVçB‚"ÒÖ6öæf–r"Â&WV—&VCÕG'VRÂG—SÕF‚¢ÆVFvW"æFEö&wVÖVçB‚"ÒÖ&6VÆ–æRÖÖæ–fW7B"Â&WV—&VCÕG'VRÂG—SÕF‚¢ÆVFvW"æFEö&wVÖVçB‚"Ò×66†VGVÆR"Â&WV—&VCÕG'VRÂG—SÕF‚¢ÆVFvW"æFEö&wVÖVçB‚"Ò×'VâÖÖæ–fW7B"ÂFW7CÒ''VåöÖæ–fW7G2"Â&WV—&VCÕG'VRÂ7F–öãÒ&VæB"ÂG—SÕF‚¢ÆVFvW"æFEö&wVÖVçB‚"ÒÖ÷WB"Â&WV—&VCÕG'VRÂG—SÕF‚¢F–vW7BÒ7V''6W'2æFE÷'6W"‚'66†VGVÆRÖF–vW7B"¢F–vW7BæFEö&wVÖVçB‚"ÒÖ6öæf–r"Â&WV—&VCÕG'VRÂG—SÕF‚¢F–vW7BæFEö&wVÖVçB‚"ÒÖ&6VÆ–æRÖÖæ–fW7B"Â&WV—&VCÕG'VRÂG—SÕF‚¢F–vW7BæFEö&wVÖVçB‚"Ò×66†VGVÆR"Â&WV—&VCÕG'VRÂG—SÕF‚¢&WGW&â'6W   ¦FVbÖ–â‚’Óâ–çC ¢G'“ ¢&WGW&â'Vâ†'V–ÆE÷'6W"‚’ç'6Uö&w2‚’¢W†6WB„6öæf–tW'&÷"Â§6öâä¥4ôäFV6öFTW'&÷"Âõ4W'&÷"’2W†3 ¢&–çB†b&W'&÷#¢¶W†7Ò"Âf–ÆS×7—2ç7FFW'"¢&WGW&â  ¦–bõöæÖUõòÓÒ%õöÖ–åõò# ¢&—6R7—7FVÔW†—B†Ö–â‚’ 
+            raise ConfigError(f"check {check_id} references an unknown URL id")
+        kind = check.get("type")
+        if kind not in CHECK_TYPES:
+            raise ConfigError(f"check {check_id} has an unsupported type")
+        clean = {"id": check_id, "url": url_id, "type": kind, "expected": _expected_string(check)}
+        if kind in {"text", "selector", "asset-reference"}:
+            value = check.get("value")
+            if not isinstance(value, str) or not value:
+                raise ConfigError(f"check {check_id} requires a non-empty value")
+            if kind == "selector" and not SELECTOR_PATTERN.fullmatch(value):
+                raise ConfigError(f"check {check_id} uses unsupported selector syntax")
+            if kind == "asset-reference":
+                value = validate_public_url(value, domain, check_dns=False)
+            clean["value"] = value
+        if kind == "canonical" and clean["expected"] != "absent":
+            clean["expected"] = validate_public_url(clean["expected"], domain, check_dns=False)
+        clean_checks.append(clean)
+    return {
+        "domain": domain,
+        "timeout_seconds": float(timeout),
+        "max_response_bytes": max_bytes,
+        "scheduled_evidence_minimum_hours": minimum_age,
+        "urls": clean_urls,
+        "checks": clean_checks,
+    }
+
+
+def config_digest(config: dict) -> str:
+    payload = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+class PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, logical_host: str, connect_ip: str, port: int, timeout: float):
+        super().__init__(logical_host, port=port, timeout=timeout)
+        self.connect_ip = connect_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self.connect_ip, self.port), self.timeout, self.source_address)
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, logical_host: str, connect_ip: str, port: int, timeout: float):
+        super().__init__(logical_host, port=port, timeout=timeout, context=ssl.create_default_context())
+        self.connect_ip = connect_ip
+
+    def connect(self) -> None:
+        raw = socket.create_connection((self.connect_ip, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TransientFetchError("end-to-end deadline expired")
+    return remaining
+
+
+def _call_with_deadline(operation, deadline: float, connection, phase: str):
+    """Run a blocking socket phase against the shared wall-clock deadline."""
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            result_queue.put((True, operation()))
+        except BaseException as exc:
+            result_queue.put((False, exc))
+
+    remaining = _remaining(deadline)
+    threading.Thread(target=worker, name=f"storefront-qa-{phase.replace(' ', '-')}", daemon=True).start()
+    try:
+        succeeded, result = result_queue.get(timeout=remaining)
+    except queue.Empty as exc:
+        connection.close()
+        raise TransientFetchError(f"end-to-end deadline expired during {phase}") from exc
+    if time.monotonic() > deadline:
+        connection.close()
+        raise TransientFetchError(f"end-to-end deadline expired during {phase}")
+    if not succeeded:
+        raise result
+    return result
+
+
+def parse_content_type(value: str) -> tuple[str | None, str | None]:
+    if not isinstance(value, str) or not value.strip():
+        return None, None
+    message = Message()
+    message["content-type"] = value
+    mime = message.get_content_type().lower()
+    charset = message.get_content_charset()
+    return mime, charset.lower() if charset else None
+
+
+def read_bounded(stream, max_bytes: int, *, deadline: float | None = None, connection=None) -> bytes:
+    chunks = []
+    size = 0
+    while True:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FetchError("end-to-end deadline expired while reading response body")
+            sock = getattr(connection, "sock", None)
+            if sock is not None:
+                sock.settimeout(remaining)
+        chunk = stream.read(min(65_536, max_bytes + 1 - size))
+        if deadline is not None and time.monotonic() > deadline:
+            raise FetchError("end-to-end deadline expired while reading response body")
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > max_bytes:
+            raise FetchError(f"response exceeded maximum of {max_bytes} bytes")
+    return b"".join(chunks)
+
+
+def _headers_dict(items: Iterable[tuple[str, str]]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, value in items:
+        lowered = key.lower()
+        result[lowered] = f"{result[lowered]}, {value.strip()}" if lowered in result else value.strip()
+    return result
+
+
+def _open_pinned(url: str, domain: str, addresses: tuple[str, ...], deadline: float):
+    parts = urlsplit(url)
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    last_error: BaseException | None = None
+    for address in addresses:
+        connection = None
+        try:
+            cls = PinnedHTTPSConnection if parts.scheme == "https" else PinnedHTTPConnection
+            connection = cls(domain, address, port, _remaining(deadline))
+            _call_with_deadline(
+                lambda: connection.request("GET", parts.path or "/", headers={
+                    "Accept": "text/html,application/xhtml+xml;q=0.9",
+                    "User-Agent": USER_AGENT,
+                    "Connection": "close",
+                }),
+                deadline,
+                connection,
+                "connection and request",
+            )
+            response = _call_with_deadline(connection.getresponse, deadline, connection, "response headers")
+            return connection, response
+        except TransientFetchError:
+            if connection is not None:
+                connection.close()
+            raise
+        except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
+            last_error = exc
+            if connection is not None:
+                connection.close()
+    raise TransientFetchError("connection to the validated public destination failed") from last_error
+
+
+def _fetch_chain_once(safe_url: str, domain: str, addresses: tuple[str, ...], deadline: float, max_bytes: int) -> PageResult:
+    current = safe_url
+    for redirect_count in range(MAX_REDIRECTS + 1):
+        connection, response = _open_pinned(current, domain, addresses, deadline)
+        try:
+            headers = _headers_dict(response.getheaders())
+            status = int(response.status)
+            if status in TRANSIENT_STATUSES:
+                raise TransientFetchError(f"transient HTTP status {status}")
+            if 300 <= status <= 399 and "location" in headers:
+                if redirect_count >= MAX_REDIRECTS:
+                    raise FetchError("redirect limit exceeded")
+                try:
+                    candidate = urljoin(current, headers["location"])
+                except ValueError as exc:
+                    raise FetchError("redirect target was malformed") from exc
+                try:
+                    current = validate_public_url(candidate, domain, check_dns=False)
+                except ConfigError as exc:
+                    raise FetchError(f"unsafe redirect blocked: {exc}") from exc
+                continue
+            content_length = headers.get("content-length")
+            if content_length:
+                try:
+                    declared = int(content_length)
+                except ValueError as exc:
+                    raise FetchError("response Content-Length was invalid") from exc
+                if declared < 0 or declared > max_bytes:
+                    raise FetchError(f"response Content-Length exceeded maximum of {max_bytes} bytes")
+            mime, _charset = parse_content_type(headers.get("content-type", ""))
+            if mime not in {"text/html", "application/xhtml+xml"}:
+                raise FetchError(f"response was not HTML (parsed MIME: {mime or 'missing'})")
+            try:
+                body = read_bounded(response, max_bytes, deadline=deadline, connection=connection)
+            except (socket.timeout, TimeoutError) as exc:
+                raise TransientFetchError("end-to-end deadline expired while reading response body") from exc
+            return PageResult(safe_url, current, status, headers, body, None)
+        finally:
+            connection.close()
+    raise FetchError("redirect limit exceeded")
+
+
+def fetch_page(url: str, domain: str, timeout: float, max_bytes: int, resolver: Callable[[str], list[str]] = resolve_addresses) -> PageResult:
+    deadline = time.monotonic() + timeout
+    try:
+        safe_url = validate_public_url(url, domain, check_dns=False)
+    except ConfigError as exc:
+        return PageResult("[rejected-url]", None, None, {}, b"", str(exc))
+    try:
+        addresses = _resolve_with_deadline(domain, resolver, deadline)
+        last_error: BaseException | None = None
+        for _attempt in range(MAX_GET_ATTEMPTS):
+            try:
+                return _fetch_chain_once(safe_url, domain, addresses, deadline, max_bytes)
+            except TransientFetchError as exc:
+                last_error = exc
+                _remaining(deadline)
+        raise TransientFetchError("GET failed after bounded retry") from last_error
+    except (ConfigError, FetchError, OSError) as exc:
+        reason = str(exc).replace("\r", " ").replace("\n", " ")[:500]
+        return PageResult(safe_url, None, None, {}, b"", reason)
+
+
+def _safe_reference(base_url: str, value: str) -> str | None:
+    try:
+        joined = urljoin(base_url, value)
+        parts = urlsplit(joined)
+        _ = parts.port
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            return None
+        return normalize_url(joined)
+    except (ConfigError, TypeError, ValueError):
+        return None
+
+
+class HTMLSnapshot(HTMLParser):
+    def __init__(self, base_url: str):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.title_parts: list[str] = []
+        self._title_depth = 0
+        self._stack: list[tuple[str, bool]] = []
+        self.text_parts: list[str] = []
+        self.canonical: str | None = None
+        self.robots_values: list[str] = []
+        self.structured_data_present = False
+        self.elements: list[tuple[str, dict[str, str]]] = []
+        self.references: set[str] = set()
+
+    def _parent_suppressed(self) -> bool:
+        return self._stack[-1][1] if self._stack else False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        attr_map = {key.lower(): (value or "") for key, value in attrs}
+        self.elements.append((tag, attr_map))
+        if tag == "title":
+            self._title_depth += 1
+        style = re.sub(r"\s+", "", attr_map.get("style", "").lower())
+        suppressed = bool(
+            self._parent_suppressed() or tag in {"head", "script", "style", "noscript", "template"}
+            or "hidden" in attr_map or attr_map.get("aria-hidden", "").lower() == "true"
+            or "display:none" in style or "visibility:hidden" in style
+        )
+        if tag not in VOID_TAGS:
+            self._stack.append((tag, suppressed))
+        if tag == "link" and "canonical" in attr_map.get("rel", "").lower().split() and self.canonical is None:
+            href = attr_map.get("href")
+            if href:
+                self.canonical = _safe_reference(self.base_url, href) or "malformed"
+        if tag == "meta" and attr_map.get("name", "").lower() == "robots":
+            self.robots_values.append(attr_map.get("content", "").lower())
+        if tag == "script" and attr_map.get("type", "").split(";", 1)[0].strip().lower() == "application/ld+json":
+            self.structured_data_present = True
+        for name in ("href", "src"):
+            value = attr_map.get(name)
+            if value:
+                reference = _safe_reference(self.base_url, value)
+                if reference:
+                    self.references.add(reference)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() not in VOID_TAGS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "title" and self._title_depth:
+            self._title_depth -= 1
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                del self._stack[index:]
+                break
+
+    def handle_data(self, data: str) -> None:
+        if self._title_depth:
+            self.title_parts.append(data)
+        if not self._parent_suppressed():
+            self.text_parts.append(data)
+
+    @property
+    def title(self) -> str:
+        return " ".join(" ".join(self.title_parts).split())
+
+    @property
+    def text(self) -> str:
+        return " ".join(" ".join(self.text_parts).split())
+
+    def has_selector(self, selector: str) -> bool:
+        parsed = SELECTOR_PATTERN.fullmatch(selector)
+        if not parsed:
+            return False
+        wanted_tag, wanted_id, wanted_class = parsed.group("tag", "id", "class")
+        wanted_tag = wanted_tag.lower() if wanted_tag else None
+        for tag, attrs in self.elements:
+            if wanted_tag and tag != wanted_tag:
+                continue
+            if wanted_id and attrs.get("id") != wanted_id:
+                continue
+            if wanted_class and wanted_class not in attrs.get("class", "").split():
+                continue
+            return True
+        return False
+
+
+def decode_html(body: bytes, content_type: str) -> str:
+    _mime, charset = parse_content_type(content_type)
+    try:
+        return body.decode(charset or "utf-8", errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
+
+def _snapshot(page: PageResult) -> HTMLSnapshot:
+    parser = HTMLSnapshot(page.final_url or page.requested_url)
+    parser.feed(decode_html(page.body, page.headers.get("content-type", "")))
+    parser.close()
+    return parser
+
+
+def _observe(check: dict, page: PageResult, snapshot: HTMLSnapshot) -> tuple[str, str]:
+    kind = check["type"]
+    if kind == "status":
+        return str(page.status), f"HTTP GET returned {page.status}; final URL {page.final_url}"
+    if kind == "title":
+        return snapshot.title, "HTML title element, whitespace normalized"
+    if kind == "canonical":
+        return snapshot.canonical or "absent", "first HTML link rel=canonical, resolved absolute; malformed is explicit"
+    if kind == "robots-indexability":
+        values = snapshot.robots_values + [page.headers.get("x-robots-tag", "").lower()]
+        noindex = any("noindex" in re.split(r"[,;\s]+", value) for value in values)
+        return ("noindex" if noindex else "indexable"), "HTML meta robots plus X-Robots-Tag; no robots.txt crawl"
+    if kind == "structured-data-presence":
+        return ("present" if snapshot.structured_data_present else "absent"), "HTML script[type=application/ld+json] presence only; JSON was not executed"
+    if kind == "text":
+        return ("present" if check["value"] in snapshot.text else "absent"), f"literal static non-hidden HTML text match for {check['value']!r}"
+    if kind == "selector":
+        return ("present" if snapshot.has_selector(check["value"]) else "absent"), f"static HTML selector match for {check['value']!r}"
+    if kind == "asset-reference":
+        return ("present" if check["value"] in snapshot.references else "absent"), f"static href/src reference for {check['value']}; asset was not fetched"
+    raise AssertionError(f"unhandled check type: {kind}")
+
+
+def baseline_map(rows: Iterable[CheckResult]) -> dict[tuple[str, str], str]:
+    return {(row.url, row.check): row.observed for row in rows}
+
+
+def evaluate(config: dict, pages: dict[str, PageResult], timestamp: str, baseline: dict[tuple[str, str], str] | None = None) -> list[CheckResult]:
+    validate_timestamp(timestamp)
+    url_by_id = {entry["id"]: entry["url"] for entry in config["urls"]}
+    snapshots: dict[str, HTMLSnapshot] = {}
+    rows = []
+    for check in config["checks"]:
+        url = url_by_id[check["url"]]
+        page = pages[check["url"]]
+        expected = baseline.get((url, check["id"])) if baseline is not None else check["expected"]
+        if expected is None:
+            raise ConfigError("baseline has no observation for a configured URL/check")
+        if page.error is not None:
+            rows.append(CheckResult(url, timestamp, check["id"], expected, "unavailable", "UNAVAILABLE", f"GET unavailable: {page.error}"))
+            continue
+        if check["url"] not in snapshots:
+            snapshots[check["url"]] = _snapshot(page)
+        observed, evidence = _observe(check, page, snapshots[check["url"]])
+        rows.append(CheckResult(url, timestamp, check["id"], expected, observed, "PASS" if observed == expected else "DRIFT", evidence))
+    return rows
+
+
+def safe_csv_cell(value: object) -> str:
+    text = str(value)
+    return "'" + text if text.startswith("'") or text.startswith(FORMULA_PREFIXES) else text
+
+
+def restore_csv_cell(value: str) -> str:
+    if value.startswith("''") or (value.startswith("'") and value[1:].startswith(FORMULA_PREFIXES)):
+        return value[1:]
+    return value
+
+
+def write_csv(path: Path, rows: Iterable[CheckResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: safe_csv_cell(value) for key, value in row._asdict().items()})
+
+
+def read_csv_records(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != CSV_FIELDS:
+            raise ConfigError("baseline CSV schema does not exactly match the required fields")
+        return [{key: restore_csv_cell(value) for key, value in row.items()} for row in reader]
+
+
+def _read_csv_records_bytes(payload: bytes) -> list[dict[str, str]]:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError("baseline CSV is not valid UTF-8") from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if reader.fieldnames != CSV_FIELDS:
+        raise ConfigError("baseline CSV schema does not exactly match the required fields")
+    return [{key: restore_csv_cell(value) for key, value in row.items()} for row in reader]
+
+
+def markdown_cell(value: object) -> str:
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    escaped = html.escape(text, quote=True).replace("\\", "\\\\").replace("|", "\\|")
+    return escaped.replace("\n", "<br>")
+
+
+def write_exceptions(path: Path, rows: Iterable[CheckResult]) -> None:
+    exceptions = [row for row in rows if row.status != "PASS"]
+    lines = [
+        "# Public Storefront QA exceptions", "",
+        "Only DRIFT and UNAVAILABLE rows appear below. Full PASS evidence is retained in the CSV.", "",
+        "| URL | Timestamp | Check | Expected | Observed | Status | Evidence |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    if exceptions:
+        lines.extend("| " + " | ".join(markdown_cell(value) for value in row) + " |" for row in exceptions)
+    else:
+        lines.append("| - | - | - | - | - | PASS | No exceptions. See CSV for full evidence. |")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65_536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_json(path: Path, value: dict) -> None:
+    path.write_text(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def validate_baseline_records(records: list[dict[str, str]]) -> None:
+    if not 1 <= len(records) <= MAX_CHECKS:
+        raise ConfigError("baseline row count is outside the supported scope")
+    seen = set()
+    timestamps = set()
+    for record in records:
+        if list(record.keys()) != CSV_FIELDS:
+            raise ConfigError("baseline row schema is invalid")
+        if record["status"] not in ALLOWED_STATUSES:
+            raise ConfigError("baseline contains an invalid status")
+        if record["status"] == "UNAVAILABLE":
+            raise ConfigError("baseline contains an unavailable observation")
+        validate_timestamp(record["timestamp"])
+        timestamps.add(record["timestamp"])
+        key = (record["url"], record["check"])
+        if key in seen:
+            raise ConfigError("baseline contains a duplicate URL/check row")
+        seen.add(key)
+    if len(timestamps) != 1:
+        raise ConfigError("baseline rows must share one timestamp")
+
+
+def _baseline_metadata(csv_path: Path, rows: list[CheckResult], config: dict, timestamp: str) -> dict:
+    baseline_time = validate_timestamp(timestamp)
+    earliest = baseline_time + timedelta(hours=config["scheduled_evidence_minimum_hours"])
+    return {
+        "schema": BASELINE_SCHEMA, "mode": "baseline", "tool_version": TOOL_VERSION,
+        "config_digest": config_digest(config),
+        "csv_sha256": _sha256_file(csv_path), "fields": CSV_FIELDS, "row_count": len(rows),
+        "captured_at": timestamp, "earliest_scheduled_evidence_at": earliest.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def write_run_artifacts(
+    out: Path,
+    mode: str,
+    rows: list[CheckResult],
+    config: dict,
+    timestamp: str,
+    baseline_provenance: LoadedBaseline | None = None,
+) -> dict:
+    if mode not in {"baseline", "rerun", "scheduled-rerun"}:
+        raise ConfigError("unsupported run mode")
+    validate_timestamp(timestamp)
+    out.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=".storefront-qa-stage-", dir=out))
+    csv_name = "baseline.csv" if mode == "baseline" else "rerun.csv"
+    meta_name = "baseline.meta.json" if mode == "baseline" else "rerun.meta.json"
+    try:
+        csv_stage, md_stage, meta_stage = stage / csv_name, stage / "exceptions.md", stage / meta_name
+        write_csv(csv_stage, rows)
+        write_exceptions(md_stage, rows)
+        if mode == "baseline":
+            metadata = _baseline_metadata(csv_stage, rows, config, timestamp)
+        else:
+            if baseline_provenance is None:
+                raise ConfigError("rerun baseline provenance is required")
+            metadata = {
+                "schema": RUN_SCHEMA, "mode": mode, "tool_version": TOOL_VERSION,
+                "evidence_class": "scheduled-change-evidence" if mode == "scheduled-rerun" else "immediate-mechanics-proof",
+                "qualifies_as_scheduled_evidence": mode == "scheduled-rerun",
+                "config_digest": config_digest(config), "csv_sha256": _sha256_file(csv_stage),
+                "fields": CSV_FIELDS, "row_count": len(rows), "captured_at": timestamp,
+                "baseline_csv_sha256": baseline_provenance.csv_sha256,
+                "baseline_captured_at": baseline_provenance.captured_at,
+            }
+        _write_json(meta_stage, metadata)
+        manifest = {
+            "schema": MANIFEST_SCHEMA, "mode": mode, "tool_version": TOOL_VERSION,
+            "committed_at": utc_timestamp(),
+            "files": {csv_name: _sha256_file(csv_stage), "exceptions.md": _sha256_file(md_stage), meta_name: _sha256_file(meta_stage)},
+        }
+        _write_json(stage / "output-manifest.json", manifest)
+        targets = [csv_name, "exceptions.md", meta_name, "output-manifest.json"]
+        backups: dict[str, Path] = {}
+        committed: list[str] = []
+        try:
+            for name in targets:
+                target = out / name
+                if target.exists():
+                    backup = stage / f"backup-{name}"
+                    os.replace(target, backup)
+                    backups[name] = backup
+                os.replace(stage / name, target)
+                committed.append(name)
+        except BaseException:
+            for name in reversed(committed):
+                target = out / name
+                if target.exists():
+                    target.unlink()
+            for name, backup in backups.items():
+                if backup.exists():
+                    os.replace(backup, out / name)
+            raise
+        return metadata
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _load_baseline(path: Path, expected_config_digest: str, expected_keys: set[tuple[str, str]] | None = None) -> LoadedBaseline:
+    try:
+        metadata = json.loads(path.with_name("baseline.meta.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError("baseline metadata is missing or invalid") from exc
+    required = {"schema", "mode", "config_digest", "csv_sha256", "fields", "row_count", "captured_at", "earliest_scheduled_evidence_at"}
+    metadata_fields = set(metadata)
+    if metadata_fields not in (required, required | {"tool_version"}) or metadata.get("schema") != BASELINE_SCHEMA or metadata.get("mode") != "baseline":
+        raise ConfigError("baseline metadata schema is invalid")
+    if metadata["config_digest"] != expected_config_digest:
+        raise ConfigError("baseline config digest does not match the current normalized config")
+    if metadata["fields"] != CSV_FIELDS:
+        raise ConfigError("baseline metadata fields are invalid")
+    validate_timestamp(metadata["captured_at"])
+    validate_timestamp(metadata["earliest_scheduled_evidence_at"])
+    try:
+        csv_payload = path.read_bytes()
+    except OSError as exc:
+        raise ConfigError("baseline CSV is missing or unreadable") from exc
+    csv_sha256 = hashlib.sha256(csv_payload).hexdigest()
+    if csv_sha256 != metadata["csv_sha256"]:
+        raise ConfigError("baseline CSV digest does not match its metadata")
+    records = _read_csv_records_bytes(csv_payload)
+    validate_baseline_records(records)
+    if metadata["row_count"] != len(records):
+        raise ConfigError("baseline row count does not match its metadata")
+    if {record["timestamp"] for record in records} != {metadata["captured_at"]}:
+        raise ConfigError("baseline timestamps do not match metadata")
+    result = {(record["url"], record["check"]): record["observed"] for record in records}
+    if expected_keys is not None and set(result) != expected_keys:
+        raise ConfigError("baseline rows do not exactly match the configured URL/check set")
+    return LoadedBaseline(result, csv_sha256, metadata["captured_at"])
+
+
+def load_baseline(path: Path, expected_config_digest: str, expected_keys: set[tuple[str, str]] | None = None) -> dict[tuple[str, str], str]:
+    return _load_baseline(path, expected_config_digest, expected_keys).observations
+
+
+def enforce_scheduled_evidence_gate(baseline_time: datetime, scheduled_for: datetime, now: datetime, minimum_age_hours: int) -> None:
+    earliest = baseline_time + timedelta(hours=minimum_age_hours)
+    if scheduled_for < earliest:
+        raise ConfigError("scheduled date is earlier than the required baseline age")
+    if now < scheduled_for or now < earliest:
+        raise ConfigError("scheduled evidence gate is not open")
+
+
+def _config_keys(config: dict) -> set[tuple[str, str]]:
+    urls = {entry["id"]: entry["url"] for entry in config["urls"]}
+    return {(urls[check["url"]], check["id"]) for check in config["checks"]}
+
+
+def _scheduled_preflight(raw: dict, baseline_path: Path, scheduled_for: str, now: datetime | None = None) -> None:
+    """Evaluate the local time gate before config validation can resolve DNS."""
+    if not isinstance(raw, dict):
+        raise ConfigError("config root must be an object")
+    minimum_age = raw.get("scheduled_evidence_minimum_hours", 72)
+    if not isinstance(minimum_age, int) or isinstance(minimum_age, bool) or not 1 <= minimum_age <= 720:
+        raise ConfigError("scheduled_evidence_minimum_hours must be an integer between 1 and 720")
+    try:
+        metadata = json.loads(baseline_path.with_name("baseline.meta.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError("baseline metadata is missing or invalid") from exc
+    if not isinstance(metadata, dict) or metadata.get("schema") != BASELINE_SCHEMA or metadata.get("mode") != "baseline":
+        raise ConfigError("baseline metadata schema is invalid")
+    baseline_time = validate_timestamp(metadata.get("captured_at"))
+    recorded_earliest = validate_timestamp(metadata.get("earliest_scheduled_evidence_at"))
+    calculated_earliest = baseline_time + timedelta(hours=minimum_age)
+    if recorded_earliest != calculated_earliest:
+        raise ConfigError("baseline scheduled evidence time does not match the local config gate")
+    enforce_scheduled_evidence_gate(
+        baseline_time,
+        validate_timestamp(scheduled_for),
+        now or datetime.now(timezone.utc),
+        minimum_age,
+    )
+
+
+def run(args: argparse.Namespace) -> int:
+    raw = json.loads(args.config.read_text(encoding="utf-8"))
+    mode = args.command
+    if mode == "scheduled-rerun":
+        _scheduled_preflight(raw, args.baseline, args.scheduled_for)
+    config = validate_config(raw)
+    loaded_baseline = None
+    baseline = None
+    if mode in {"rerun", "scheduled-rerun"}:
+        loaded_baseline = _load_baseline(args.baseline, config_digest(config), _config_keys(config))
+        baseline = loaded_baseline.observations
+    timestamp = utc_timestamp()
+    pages = {
+        entry["id"]: fetch_page(entry["url"], config["domain"], config["timeout_seconds"], config["max_response_bytes"])
+        for entry in config["urls"]
+    }
+    rows = evaluate(config, pages, timestamp, baseline)
+    metadata = write_run_artifacts(args.out, mode, rows, config, timestamp, loaded_baseline)
+    csv_name = "baseline.csv" if mode == "baseline" else "rerun.csv"
+    counts = {status: sum(row.status == status for row in rows) for status in ("PASS", "DRIFT", "UNAVAILABLE")}
+    print(json.dumps({"output": str(args.out / csv_name), "exceptions": str(args.out / "exceptions.md"), "metadata": metadata, **counts}, sort_keys=True))
+    return 0 if not counts["DRIFT"] and not counts["UNAVAILABLE"] else 2
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in ("baseline", "rerun", "scheduled-rerun"):
+        sub = subparsers.add_parser(command)
+        sub.add_argument("--config", required=True, type=Path)
+        sub.add_argument("--out", required=True, type=Path)
+        if command in {"rerun", "scheduled-rerun"}:
+            sub.add_argument("--baseline", required=True, type=Path)
+        if command == "scheduled-rerun":
+            sub.add_argument("--scheduled-for", required=True, help="UTC RFC 3339 second at or after the minimum baseline age")
+    return parser
+
+
+def main() -> int:
+    try:
+        return run(build_parser().parse_args())
+    except (ConfigError, json.JSONDecodeError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
