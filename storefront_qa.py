@@ -37,6 +37,7 @@ MAX_RESPONSE_BYTES = 2_000_000
 MAX_ARTIFACT_CELL_CHARS = MAX_RESPONSE_BYTES * 4
 MAX_URL_CHARS = 4_096
 MAX_CONFIG_VALUE_CHARS = 16_384
+MAX_JSON_DEPTH = 100
 MAX_REDIRECTS = 5
 MAX_GET_ATTEMPTS = 2
 TOOL_VERSION = "1.1.0"
@@ -906,10 +907,12 @@ def _write_json(path: Path, value: dict) -> None:
 
 
 def _validate_unicode_scalar_strings(value: object, label: str) -> None:
-    pending = [value]
+    pending = [(value, 0)]
     visited: set[int] = set()
     while pending:
-        current = pending.pop()
+        current, depth = pending.pop()
+        if depth > MAX_JSON_DEPTH:
+            raise ConfigError(f"{label} exceeds the maximum JSON nesting depth")
         if isinstance(current, str):
             try:
                 current.encode("utf-8")
@@ -923,9 +926,9 @@ def _validate_unicode_scalar_strings(value: object, label: str) -> None:
             visited.add(identity)
         if isinstance(current, dict):
             for key, item in current.items():
-                pending.extend((key, item))
+                pending.extend(((key, depth + 1), (item, depth + 1)))
         elif isinstance(current, list):
-            pending.extend(current)
+            pending.extend((item, depth + 1) for item in current)
 
 
 def _strict_json_object(payload: bytes, label: str) -> dict:

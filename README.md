@@ -24,7 +24,7 @@ Jake Springfield is a public-facing business alias for Springfield Systems, whic
 
 ## Safety boundary
 
-- One exact ASCII hostname, 1-6 explicit URLs, and 1-20 checks per normalized config. Each URL is capped at 4,096 characters and each configured expected or match value at 16,384 characters so every generated artifact can be verified with the same parser bounds.
+- One exact ASCII hostname, 1-6 explicit URLs, and 1-20 checks per normalized config. Each URL is capped at 4,096 characters, each configured expected or match value at 16,384 characters, and JSON nesting at 100 levels so every generated artifact can be verified consistently across supported Python versions with the same parser bounds.
 - Only `http` or `https` on ports 80/443. Credentials and every query/fragment delimiter, including empty `?`/`#`, are rejected without echoing the rejected URL.
 - URL paths are repeatedly percent-decoded and Unicode-normalized until stable. Ambiguous encoding, backslashes, semicolons, dot paths, and account/auth/cart/checkout route segments are rejected. Accepted Unicode paths are UTF-8 percent-encoded only at the HTTP transport seam.
 - DNS must return only public unicast addresses. Private, loopback, link-local, multicast, unspecified, reserved, and malformed destinations fail closed. After a verified baseline, a transient DNS failure is recorded as `UNAVAILABLE`; it never relaxes the destination-class check.

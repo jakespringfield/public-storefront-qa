@@ -153,11 +153,13 @@ class ConfigSafetyTests(unittest.TestCase):
             with self.subTest(size=len(payload)), self.assertRaises(qa.ConfigError):
                 qa._strict_json_object(payload, "config")
 
-    def test_unicode_scalar_validation_is_iterative(self):
+    def test_unicode_scalar_validation_enforces_iterative_depth_bound(self):
         value = "safe"
-        for _ in range(2_000):
+        for _ in range(qa.MAX_JSON_DEPTH):
             value = [value]
         qa._validate_unicode_scalar_strings(value, "config")
+        with self.assertRaisesRegex(qa.ConfigError, "nesting depth"):
+            qa._validate_unicode_scalar_strings([value], "config")
 
     def test_bad_json_value_types_fail_as_config_errors(self):
         cases = []
