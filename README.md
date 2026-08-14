@@ -1,12 +1,14 @@
 # Public Storefront QA
 
-Deterministic, read-only baseline and drift evidence for small public storefront surfaces. The Python-standard-library runner sends one bounded `GET` per explicitly configured public HTML URL, parses returned HTML without executing JavaScript, and writes a losslessly machine-readable CSV plus an escaped exception report.
+Bounded, read-only baseline and drift evidence for small public storefront surfaces. The Python-standard-library runner performs one bounded request workflow per explicitly configured public HTML URL, including at most five same-host redirects and one transient retry, parses returned HTML without executing JavaScript, and writes a losslessly machine-readable CSV plus an escaped exception report.
 
-The free core is complete and usable on its own. It contains no AI runtime, telemetry, account requirement, external service, or checkout dependency.
+The free core is complete and usable on its own. It contains no AI runtime, telemetry, account requirement, third-party SaaS dependency, or checkout dependency. Normal DNS infrastructure and the configured public target hosts still receive ordinary network request metadata.
 
 ## Managed pilot
 
-Springfield Systems offers a **$250 USD managed pilot** for one buyer-authorized public domain: up to six public URLs and 20 frozen checks, a baseline, one rerun after at least 72 real hours, source-linked CSV and Markdown evidence, and one consolidated factual correction. An optional **$150 USD per-domain monthly continuation** adds four weekly reruns and one change-only month-end ledger.
+Springfield Systems offers a **$250 USD managed pilot** for one buyer-authorized public domain: up to six public URLs and 20 frozen checks, a baseline, one rerun of the same frozen scope after at least 72 real hours, source-linked CSV and Markdown evidence, and one consolidated factual correction. An optional **$150 USD per-domain monthly continuation** adds four weekly reruns of the same frozen scope and one change-only month-end ledger.
+
+The free core requires the caller to design the configuration, run and schedule it, retain local history, verify manifests, and interpret exceptions. The managed service adds written scope design and approval, real-time scheduling, retained and versioned runs, manifest verification, bounded exception interpretation, the month-end ledger, and the included correction.
 
 The service never signs in, submits forms, enters carts or checkout, accesses analytics or customer data, changes a site, performs security testing, or claims legal compliance or conversion accuracy. Scope review is non-binding and starts no work or payment: [request a public pilot scope review](https://github.com/jakespringfield/public-storefront-qa/issues/new?template=pilot-scope-review.yml).
 
@@ -33,7 +35,7 @@ This is external evidence capture, not a security scanner, rendered-browser test
 | `status` | Final HTTP status integer |
 | `title` | Normalized HTML `<title>` text |
 | `canonical` | First HTTP(S) canonical URL, resolved absolute, `absent`, or `malformed` |
-| `robots-indexability` | `noindex` if meta robots or `X-Robots-Tag` contains it, otherwise `indexable`; `robots.txt` is not fetched |
+| `robots-indexability` | `noindex` if meta robots or `X-Robots-Tag` contains it, otherwise `no-noindex-observed`; `robots.txt` is not fetched and this does not establish search-engine eligibility |
 | `structured-data-presence` | Presence of `script[type="application/ld+json"]`; content is not evaluated or executed |
 | `text` | Literal static HTML text outside `head`, script/style/noscript/template, `hidden`, `aria-hidden="true"`, and inline display/visibility hiding |
 | `selector` | Static presence using `tag`, `#id`, `.class`, `tag#id`, `tag.class`, or `tag#id.class` |
@@ -87,3 +89,4 @@ The offline suite includes adversarial regressions for scope caps, destination c
 ## License and support boundary
 
 The core is MIT-licensed. See [LICENSE](LICENSE). Security and data-handling boundaries are documented in [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md). This repository provides the free software as-is; the managed pilot is a separate evidence-capture service with the fixed scope above.
+
