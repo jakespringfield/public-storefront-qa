@@ -1,5 +1,7 @@
 # Public Storefront QA
 
+[![Test](https://github.com/jakespringfield/public-storefront-qa/actions/workflows/test.yml/badge.svg)](https://github.com/jakespringfield/public-storefront-qa/actions/workflows/test.yml)
+
 Bounded, read-only baseline and drift evidence for small public storefront surfaces. The Python-standard-library runner performs one bounded request workflow per explicitly configured public HTML URL, including at most five same-host redirects and one transient retry, parses returned HTML without executing JavaScript, and writes a losslessly machine-readable CSV plus an escaped exception report.
 
 The free core is complete and usable on its own. It contains no AI runtime, telemetry, account requirement, third-party SaaS dependency, or checkout dependency. Normal DNS infrastructure and the configured public target hosts still receive ordinary network request metadata.
