@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import json
 import tempfile
@@ -132,6 +133,9 @@ class ConfigSafetyTests(unittest.TestCase):
 
 
 class FetchSafetyTests(unittest.TestCase):
+    def test_user_agent_uses_release_version(self):
+        self.assertIn(f"/{qa.TOOL_VERSION} ", qa.USER_AGENT)
+
     def test_fetch_pins_the_single_validated_dns_answer_set(self):
         resolver_calls = []
 
@@ -334,6 +338,38 @@ class ReportingTests(unittest.TestCase):
 
 
 class BaselineProvenanceTests(unittest.TestCase):
+    def test_release_metadata_records_version_and_exact_baseline_lineage(self):
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        baseline_row = qa.CheckResult("https://example.com/", "2026-08-14T12:00:00Z", "status", "200", "200", "PASS", "ok")
+        rerun_row = baseline_row._replace(timestamp="2026-08-14T13:00:00Z")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            baseline_metadata = qa.write_run_artifacts(out, "baseline", [baseline_row], cfg, baseline_row.timestamp)
+            baseline_manifest = json.loads((out / "output-manifest.json").read_text(encoding="utf-8"))
+            baseline_digest = hashlib.sha256((out / "baseline.csv").read_bytes()).hexdigest()
+            loaded = qa._load_baseline(out / "baseline.csv", qa.config_digest(cfg))
+
+            self.assertEqual(baseline_metadata["tool_version"], qa.TOOL_VERSION)
+            self.assertEqual(baseline_manifest["tool_version"], qa.TOOL_VERSION)
+            self.assertEqual(loaded.csv_sha256, baseline_digest)
+            self.assertEqual(loaded.captured_at, baseline_row.timestamp)
+
+            rerun_metadata = qa.write_run_artifacts(
+                out, "rerun", [rerun_row], cfg, rerun_row.timestamp, loaded
+            )
+            rerun_manifest = json.loads((out / "output-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(rerun_metadata["tool_version"], qa.TOOL_VERSION)
+            self.assertEqual(rerun_metadata["baseline_csv_sha256"], baseline_digest)
+            self.assertEqual(rerun_metadata["baseline_captured_at"], baseline_row.timestamp)
+            self.assertEqual(rerun_manifest["tool_version"], qa.TOOL_VERSION)
+
+    def test_rerun_artifacts_require_loaded_baseline_provenance(self):
+        cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
+        row = qa.CheckResult("https://example.com/", "2026-08-14T13:00:00Z", "status", "200", "200", "PASS", "ok")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(qa.ConfigError, "baseline provenance"):
+                qa.write_run_artifacts(Path(tmp), "rerun", [row], cfg, row.timestamp)
+
     def test_baseline_is_bound_to_full_normalized_config_digest(self):
         cfg = qa.validate_config(valid_config(), resolver=lambda _host: ["93.184.216.34"])
         row = qa.CheckResult("https://example.com/", "2026-08-14T12:00:00Z", "status", "200", "200", "PASS", "ok")
@@ -402,4 +438,3 @@ class BaselineProvenanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
