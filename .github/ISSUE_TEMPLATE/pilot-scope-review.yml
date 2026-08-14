@@ -7,7 +7,7 @@ body:
       value: |
         This issue is public. Submit only public, non-security storefront URLs and public expectations. Do not submit credentials, personal or customer data, analytics exports, unpublished code, vulnerability details, or financial information.
 
-        A scope review is non-binding. It creates no order, payment obligation, reservation, or work. The fixed pilot is $250 USD for one buyer-authorized public domain, up to six public URLs and 20 frozen checks, a baseline, one rerun after at least 72 real hours, source-linked CSV and Markdown evidence, and one consolidated factual correction. Optional continuation is $150 USD per domain per month for four weekly reruns of the same frozen scope and one change-only month-end ledger, month-to-month with no automatic renewal or scope expansion.
+        A scope review is non-binding. It creates no order, payment obligation, reservation, or work. The fixed pilot is $250 USD for one buyer-authorized public domain, up to six public URLs and 20 frozen checks, a baseline, one rerun after at least 72 real hours, source-linked CSV and Markdown evidence, and one consolidated factual correction. Optional continuation is $150 USD per domain per month for four weekly reruns of the same frozen scope and one change-only month-end ledger. Each month requires separate written acceptance of the exact period, four UTC capture windows, and canonical schedule SHA-256. There is no automatic renewal or scope expansion.
   - type: input
     id: domain
     attributes:
