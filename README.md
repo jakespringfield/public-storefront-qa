@@ -56,7 +56,7 @@ python storefront_qa.py rerun --config examples\springfield.json --baseline samp
 
 Baseline compares observations with config expectations. Immediate `rerun` compares new observations with the baseline and is labeled `immediate-mechanics-proof` in `rerun.meta.json`. It proves the comparison mechanics only. It is not evidence of 72-hour stability or drift detection.
 
-The baseline is bound to the SHA-256 digest of the entire normalized config, including URL/check semantics and transport bounds. `baseline.meta.json` also binds CSV digest, exact schema, row count, timestamp, and earliest scheduled evidence time. Baseline loading validates metadata, CSV digest, exact columns, status enum, timestamps, uniqueness, and the exact configured URL/check set.
+The baseline is bound to the SHA-256 digest of the entire normalized config, including URL/check semantics and transport bounds. `baseline.meta.json` also binds tool version, CSV digest, exact schema, row count, timestamp, and earliest scheduled evidence time. Baseline loading validates metadata, CSV digest, exact columns, status enum, timestamps, uniqueness, and the exact configured URL/check set. Rerun metadata records the exact loaded baseline CSV SHA-256 and its `captured_at` timestamp.
 
 ## Real scheduled evidence gate
 
@@ -72,7 +72,7 @@ The command has no timestamp override. Before full config validation or DNS, it 
 
 ## Outputs and safe consumption
 
-Baseline writes `baseline.csv`; either rerun writes `rerun.csv`. Every run also writes `exceptions.md`, mode-specific metadata, and `output-manifest.json`. All files are staged first, installed with rollback, and the manifest is committed last as the logical transaction marker. Consumers should verify the latest manifest hashes before using a pair.
+Baseline writes `baseline.csv`; either rerun writes `rerun.csv`. Every run also writes `exceptions.md`, mode-specific metadata, and `output-manifest.json`. Metadata and the manifest identify the tool version. All files are staged first, installed with rollback, and the manifest is committed last as the logical transaction marker. Consumers should verify the latest manifest hashes before using a pair.
 
 CSV columns are exactly `url,timestamp,check,expected,observed,status,evidence`. Status is `PASS`, `DRIFT`, or `UNAVAILABLE`. Formula-triggering prefixes are neutralized with a collision-safe reversible apostrophe encoding. `read_csv_records()` restores the exact logical values, including values originally beginning with apostrophes. Markdown cells HTML-escape untrusted text and escape backslashes, pipes, and line endings.
 
@@ -89,4 +89,3 @@ The offline suite includes adversarial regressions for scope caps, destination c
 ## License and support boundary
 
 The core is MIT-licensed. See [LICENSE](LICENSE). Security and data-handling boundaries are documented in [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md). This repository provides the free software as-is; the managed pilot is a separate evidence-capture service with the fixed scope above.
-
