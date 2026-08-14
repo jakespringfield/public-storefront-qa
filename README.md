@@ -20,6 +20,8 @@ One-off pilot artifacts are retained locally for at most 30 days after delivery.
 
 The service never signs in, submits forms, enters carts or checkout, accesses analytics or customer data, changes a site, performs security testing, or claims legal compliance or conversion accuracy. Scope review is non-binding and starts no work or payment: [request a public pilot scope review](https://github.com/jakespringfield/public-storefront-qa/issues/new?template=pilot-scope-review.yml). GitHub sign-in is required to submit, and the resulting issue is public.
 
+For a question about whether this public-only scope fits before submitting, email [jakespringfield1@gmail.com](mailto:jakespringfield1@gmail.com?subject=Public%20Storefront%20QA%20scope%20question). Do not send credentials, customer or personal data, private-repository details, or security findings. Email creates no order or payment obligation and does not replace the public scope-review intake.
+
 Jake Springfield is a public-facing business alias for Springfield Systems, which is not represented as incorporated. OpenAI Codex materially assisted implementation, testing, and documentation. No separate personal human review is promised. The project and service are independent of OpenAI and every storefront evaluated.
 
 ## Safety boundary
