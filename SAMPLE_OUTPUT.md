@@ -8,6 +8,8 @@ This is a compact preview of the free runner's evidence format against the publi
 - Evidence class: `immediate-mechanics-proof`
 - Earliest eligible scheduled comparison for this exact baseline: `2026-08-17T13:45:52Z`
 
+The later eligible comparison is preserved in [SCHEDULED_OUTPUT.md](SCHEDULED_OUTPUT.md). It detected the buyer-facing CTA being hardened from `Request the $250 pilot scope review` to `Request the non-binding $250 pilot scope review`. This historical preview remains bound to the original configuration digest below. The current example now expects the non-binding CTA; it needs a fresh baseline manifest and a new 72-hour window before any future scheduled or monthly claim.
+
 | Check | Expected | Observed | Status |
 |---|---|---|---|
 | HTTP status | `200` | `200` | PASS |
