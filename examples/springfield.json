@@ -44,7 +44,7 @@
       "id": "storefront-primary-copy",
       "url": "storefront",
       "type": "text",
-      "value": "Request the $250 pilot scope review",
+      "value": "Request the non-binding $250 pilot scope review",
       "expected": "present"
     },
     {
