@@ -12,7 +12,7 @@ Springfield Systems offers a **$250 USD managed pilot** for one buyer-authorized
 
 See the [managed pilot page](https://springfield-systems.jakespringfield1.workers.dev/public-storefront-qa) for the buyer-facing scope, deliverables, operating boundaries, and public intake path.
 
-See [SAMPLE_OUTPUT.md](SAMPLE_OUTPUT.md) for a compact, integrity-linked preview. It is explicitly labeled as an immediate mechanics proof, not 72-hour change evidence.
+See [SAMPLE_OUTPUT.md](SAMPLE_OUTPUT.md) for the immediate mechanics preview and [SCHEDULED_OUTPUT.md](SCHEDULED_OUTPUT.md) for the first genuine 72-hour comparison. The scheduled proof preserves its detected CTA-copy drift instead of rewriting the result as a pass.
 
 The free core requires the caller to design the configuration and monthly schedule, run it at the agreed times, retain separate source bundles, verify manifests, generate the ledger, and interpret exceptions. The managed service adds written scope and schedule design, buyer approval, scheduled captures in the agreed windows, retained and versioned runs, manifest verification, bounded exception interpretation, and the buyer handoff. The pilot correction does not automatically renew as a monthly correction; any continuation correction must be stated in that month's written acceptance.
 
